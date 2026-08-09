@@ -9,11 +9,13 @@ pub struct BranchSection {
     pub worktree_path: PathBuf,
     pub is_current: bool,
     pub is_locked: bool,
+    pub is_stored_only: bool,
 }
 
 #[derive(Debug)]
 pub struct RepositoryContext {
     pub head_label: String,
+    pub common_git_dir: PathBuf,
     pub sections: Vec<BranchSection>,
 }
 
@@ -21,6 +23,7 @@ impl Default for RepositoryContext {
     fn default() -> Self {
         Self {
             head_label: "unknown".to_owned(),
+            common_git_dir: PathBuf::new(),
             sections: Vec::new(),
         }
     }
@@ -30,6 +33,10 @@ impl RepositoryContext {
     pub fn discover(path: impl AsRef<std::path::Path>) -> Result<Self, gix::discover::Error> {
         let repository = gix::discover(path)?;
         let current_git_dir = repository.git_dir().to_path_buf();
+        let common_git_dir = repository
+            .common_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| repository.common_dir().to_path_buf());
         let head_label = head_label(&repository);
         let mut current = branch_section(&repository, &current_git_dir, false);
         let mut others = Vec::new();
@@ -85,8 +92,34 @@ impl RepositoryContext {
 
         Ok(Self {
             head_label,
+            common_git_dir,
             sections,
         })
+    }
+
+    pub fn add_stored_branches<'a>(&mut self, branch_refs: impl IntoIterator<Item = &'a str>) {
+        let mut seen = self
+            .sections
+            .iter()
+            .map(|section| section.full_ref_name.clone())
+            .collect::<HashSet<_>>();
+        let mut stored_only = branch_refs
+            .into_iter()
+            .filter(|branch_ref| seen.insert((*branch_ref).to_owned()))
+            .map(|branch_ref| BranchSection {
+                full_ref_name: branch_ref.to_owned(),
+                display_name: branch_ref
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(branch_ref)
+                    .to_owned(),
+                worktree_path: PathBuf::new(),
+                is_current: false,
+                is_locked: false,
+                is_stored_only: true,
+            })
+            .collect::<Vec<_>>();
+        stored_only.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+        self.sections.extend(stored_only);
     }
 }
 
@@ -112,6 +145,7 @@ fn branch_section(
         worktree_path: worktree.base().to_path_buf(),
         is_current: repository.git_dir() == current_git_dir,
         is_locked: worktree.is_locked(),
+        is_stored_only: false,
     })
 }
 
@@ -241,9 +275,11 @@ mod tests {
     #[test]
     fn discovers_valid_worktree_branches_and_prioritizes_the_launch_worktree() {
         let fixture = Fixture::new();
+        let expected_common_dir = fixture.main.join(".git").canonicalize().unwrap();
 
         let main_context = RepositoryContext::discover(&fixture.main).unwrap();
         assert_eq!(main_context.head_label, "main");
+        assert_eq!(main_context.common_git_dir, expected_common_dir);
         assert_eq!(
             main_context
                 .sections
@@ -271,6 +307,38 @@ mod tests {
         );
         assert!(feature_context.sections[0].is_current);
         assert!(feature_context.sections[0].is_locked);
+        assert_eq!(feature_context.common_git_dir, expected_common_dir);
+        assert!(
+            feature_context
+                .sections
+                .iter()
+                .all(|section| !section.is_stored_only)
+        );
+    }
+
+    #[test]
+    fn adds_sorted_stored_only_branches_without_duplicating_worktrees() {
+        let fixture = Fixture::new();
+        let mut context = RepositoryContext::discover(&fixture.main).unwrap();
+
+        context.add_stored_branches([
+            "refs/heads/z-stored",
+            "refs/heads/main",
+            "refs/heads/a-stored",
+        ]);
+
+        assert_eq!(
+            context
+                .sections
+                .iter()
+                .map(|section| section.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["main", "feature/auth", "offline", "a-stored", "z-stored"]
+        );
+        assert!(!context.sections[0].is_stored_only);
+        assert!(context.sections[3].is_stored_only);
+        assert!(context.sections[4].is_stored_only);
+        assert!(context.sections[3].worktree_path.as_os_str().is_empty());
     }
 
     #[test]
