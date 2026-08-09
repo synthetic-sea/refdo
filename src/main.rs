@@ -117,10 +117,6 @@ impl App {
             }
         };
         repository.add_stored_branches(todos.iter().map(|todo| todo.branch_ref.as_str()));
-        let focus = repository
-            .sections
-            .first()
-            .map(|section| Focus::Branch(section.full_ref_name.clone()));
 
         Self {
             exit: false,
@@ -128,7 +124,7 @@ impl App {
             store,
             persistence_available,
             todos,
-            focus,
+            focus: None,
             draft: None,
             theme,
             input_mode: InputMode::Normal,
@@ -205,9 +201,8 @@ impl App {
         self.pointer_position = Some(position);
         if self.input_mode == InputMode::Normal
             && mouse_event.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(focus) = self.focus_at(position)
         {
-            self.focus = Some(focus);
+            self.focus = self.focus_at(position);
         }
     }
 
@@ -288,14 +283,16 @@ impl App {
     }
 
     fn repair_focus(&mut self) {
-        let valid = match self.focus.as_ref() {
-            Some(Focus::Branch(branch_ref)) => self
+        let Some(focus) = self.focus.as_ref() else {
+            return;
+        };
+        let valid = match focus {
+            Focus::Branch(branch_ref) => self
                 .repository
                 .sections
                 .iter()
                 .any(|section| section.full_ref_name == *branch_ref),
-            Some(Focus::Todo(id)) => self.todos.iter().any(|todo| todo.id == *id),
-            None => false,
+            Focus::Todo(id) => self.todos.iter().any(|todo| todo.id == *id),
         };
         if !valid {
             self.focus = self.flattened_focuses().into_iter().next();
@@ -1303,6 +1300,29 @@ mod tests {
     }
 
     #[test]
+    fn unfocused_rows_render_without_selection() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.focus = None;
+        let theme = app.theme;
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert_eq!(terminal.backend().buffer()[(2, 2)].bg, theme.background);
+    }
+
+    #[test]
+    fn focus_repair_preserves_explicit_deselection() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.focus = None;
+
+        app.repair_focus();
+
+        assert_eq!(app.focus, None);
+    }
+
+    #[test]
     fn selected_background_takes_precedence_over_hover() {
         let mut app = app_with_sections(vec![section("main")]);
         let theme = app.theme;
@@ -1356,23 +1376,19 @@ mod tests {
     }
 
     #[test]
-    fn clicks_on_empty_rows_and_outside_the_viewport_do_not_change_focus() {
+    fn clicks_on_empty_rows_and_outside_the_viewport_deselect() {
         let mut app = app_with_sections(vec![section("main"), section("topic")]);
         let topic = Focus::Branch("refs/heads/topic".to_owned());
-        app.focus = Some(topic.clone());
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(row_text(&terminal, 3).contains("No todos"));
 
-        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
-        assert_eq!(app.focus, Some(topic.clone()));
-
-        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 0, 2));
-        assert_eq!(app.focus, Some(topic.clone()));
-
-        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 39, 2));
-        assert_eq!(app.focus, Some(topic));
+        for (column, row) in [(2, 3), (0, 2), (39, 2), (2, 6)] {
+            app.focus = Some(topic.clone());
+            app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+            assert_eq!(app.focus, None);
+        }
     }
 
     #[test]
