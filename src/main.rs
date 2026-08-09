@@ -146,9 +146,14 @@ impl App {
         .areas(frame.area());
 
         render_status_bar(frame, status_area, &self.repository.head_label, &self.theme);
+        let content_block = Block::bordered()
+            .style(Style::default().bg(self.theme.background))
+            .border_style(Style::default().fg(self.theme.foreground));
+        let todo_area = content_block.inner(content_area);
+        frame.render_widget(content_block, content_area);
         render_branch_sections(
             frame,
-            content_area,
+            todo_area,
             &self.repository.sections,
             &self.todos,
             self.focus.as_ref(),
@@ -626,9 +631,14 @@ fn render_branch_sections(
                     theme.background
                 };
                 let marker = if todo.completed { "[x]" } else { "[ ]" };
+                let foreground = if todo.completed {
+                    theme.foreground_muted
+                } else {
+                    theme.foreground
+                };
                 frame.render_widget(
                     Paragraph::new(format!("    {marker} {}", todo.title))
-                        .style(Style::default().fg(theme.foreground).bg(background)),
+                        .style(Style::default().fg(foreground).bg(background)),
                     row_area,
                 );
             }
@@ -912,10 +922,18 @@ mod tests {
         assert!(app.store.load_all().unwrap()[0].completed);
         assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
         assert!(app.error.is_none());
-        let backend = TestBackend::new(40, 4);
+        let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(row_text(&terminal, 2).contains("[x] toggle me"));
+        assert!(row_text(&terminal, 3).contains("[x] toggle me"));
+        assert_eq!(
+            terminal.backend().buffer()[(5, 3)].fg,
+            app.theme.foreground_muted
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(9, 3)].fg,
+            app.theme.foreground_muted
+        );
 
         app.handle_key_event(key(KeyCode::Char(' ')));
 
@@ -929,7 +947,9 @@ mod tests {
         assert!(!app.store.load_all().unwrap()[0].completed);
         assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(row_text(&terminal, 2).contains("[ ] toggle me"));
+        assert!(row_text(&terminal, 3).contains("[ ] toggle me"));
+        assert_eq!(terminal.backend().buffer()[(5, 3)].fg, app.theme.foreground);
+        assert_eq!(terminal.backend().buffer()[(9, 3)].fg, app.theme.foreground);
     }
 
     #[test]
@@ -1058,17 +1078,17 @@ mod tests {
             .unwrap();
         app.reload();
         app.focus = Some(Focus::Todo(todo.id));
-        let backend = TestBackend::new(18, 3);
+        let backend = TestBackend::new(18, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(row_text(&terminal, 1).contains("visible"));
+        assert!(row_text(&terminal, 2).contains("visible"));
 
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "ab界cd界ef");
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let cursor = terminal.backend_mut().get_cursor_position().unwrap();
-        assert_eq!(cursor.y, 1);
-        assert!(cursor.x < 18);
+        assert_eq!(cursor.y, 2);
+        assert!(cursor.x < 17);
     }
 
     #[test]
@@ -1076,14 +1096,14 @@ mod tests {
         let mut app = app_with_sections(vec![section("main")]);
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "👩‍🔬");
-        let backend = TestBackend::new(10, 3);
+        let backend = TestBackend::new(12, 5);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
         let cursor = terminal.backend_mut().get_cursor_position().unwrap();
-        assert_eq!(cursor, Position::new(8, 1));
-        assert_eq!(row_text(&terminal, 1), "    [ ]   ");
+        assert_eq!(cursor, Position::new(9, 2));
+        assert_eq!(row_text(&terminal, 2), "│    [ ]   │");
     }
 
     #[test]
@@ -1152,14 +1172,17 @@ mod tests {
             is_stored_only: true,
         };
         let app = app_with_sections(vec![normal, stored]);
-        let backend = TestBackend::new(19, 6);
+        let backend = TestBackend::new(21, 9);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(!row_text(&terminal, 1).contains("WORKTREE"));
-        assert_eq!(row_text(&terminal, 3), "                   ");
-        assert!(row_text(&terminal, 4).contains("BRANCH"));
+        assert!(row_text(&terminal, 1).starts_with('┌'));
+        assert_eq!(terminal.backend().buffer()[(0, 1)].fg, theme.foreground);
+        assert!(!row_text(&terminal, 2).contains("WORKTREE"));
+        assert_eq!(row_text(&terminal, 4), "│                   │");
+        assert!(row_text(&terminal, 5).contains("BRANCH"));
+        assert!(row_text(&terminal, 7).starts_with('└'));
         assert_eq!(
-            terminal.backend().buffer()[(0, 1)].bg,
+            terminal.backend().buffer()[(1, 2)].bg,
             theme.selection_background
         );
     }
