@@ -5,20 +5,16 @@ pub struct Theme {
     pub background: Color,
     pub foreground: Color,
     pub foreground_muted: Color,
+    pub status_bar_background: Color,
+    pub mode_background: Color,
+    pub mode_foreground: Color,
 }
 
-impl Theme {
-    pub const fn new(background: Color, foreground: Color, foreground_muted: Color) -> Self {
-        Self {
-            background,
-            foreground,
-            foreground_muted,
-        }
-    }
-}
-
-pub const TOKYO_NIGHT_DAY: Theme = Theme::new(
-    Color::Rgb(225, 226, 231),
-    Color::Rgb(55, 96, 191),
-    Color::Rgb(137, 144, 179),
-);
+pub const TOKYO_NIGHT_DAY: Theme = Theme {
+    background: Color::Rgb(225, 226, 231),
+    foreground: Color::Rgb(55, 96, 191),
+    foreground_muted: Color::Rgb(137, 144, 179),
+    status_bar_background: Color::Rgb(196, 200, 218),
+    mode_background: Color::Rgb(46, 125, 233),
+    mode_foreground: Color::Rgb(208, 213, 227),
+};

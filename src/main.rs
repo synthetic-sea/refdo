@@ -7,6 +7,7 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Paragraph},
 };
 
@@ -44,14 +45,19 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        let [status_area, content_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(frame.area());
+        let [status_area, content_area, footer_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
 
         render_status_bar(frame, status_area, &self.branch, &self.theme);
         frame.render_widget(
             Block::default().style(Style::default().bg(self.theme.background)),
             content_area,
         );
+        render_footer(frame, footer_area, &self.theme);
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -68,7 +74,7 @@ impl App {
 
 fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme) {
     frame.render_widget(
-        Block::default().style(Style::default().bg(theme.background)),
+        Block::default().style(Style::default().bg(theme.status_bar_background)),
         area,
     );
 
@@ -80,7 +86,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme)
             .style(
                 Style::default()
                     .fg(theme.foreground)
-                    .bg(theme.background)
+                    .bg(theme.status_bar_background)
                     .add_modifier(Modifier::BOLD),
             )
             .left_aligned(),
@@ -91,10 +97,29 @@ fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme)
             .style(
                 Style::default()
                     .fg(theme.foreground_muted)
-                    .bg(theme.background),
+                    .bg(theme.status_bar_background),
             )
             .right_aligned(),
         context_area,
+    );
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let mode = Span::styled(
+        " NORMAL ",
+        Style::default()
+            .fg(theme.mode_foreground)
+            .bg(theme.mode_background)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(mode)).style(
+            Style::default()
+                .fg(theme.foreground)
+                .bg(theme.status_bar_background),
+        ),
+        area,
     );
 }
 
@@ -126,30 +151,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn application_uses_the_supplied_theme_for_every_rendered_cell() {
-        let theme = Theme::new(Color::Red, Color::Green, Color::Blue);
+    fn application_uses_the_supplied_theme_for_header_content_and_footer() {
+        let theme = Theme {
+            background: Color::Red,
+            foreground: Color::Green,
+            foreground_muted: Color::Blue,
+            status_bar_background: Color::Yellow,
+            mode_background: Color::Magenta,
+            mode_foreground: Color::Cyan,
+        };
         let app = App {
             exit: false,
             branch: "feature/auth".to_owned(),
             theme,
         };
-        let backend = TestBackend::new(30, 2);
+        let backend = TestBackend::new(30, 3);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
         let buffer = terminal.backend().buffer();
-        let row = (0..30)
+        let header = (0..30)
             .map(|column| buffer[(column, 0)].symbol())
             .collect::<String>();
+        let footer = (0..30)
+            .map(|column| buffer[(column, 2)].symbol())
+            .collect::<String>();
 
-        assert_eq!(row, " tuido       git:feature/auth ");
-        assert!(
-            (0..2).all(|row| (0..30).all(|column| buffer[(column, row)].bg == theme.background))
-        );
+        assert_eq!(header, " tuido       git:feature/auth ");
+        assert_eq!(footer, format!("{:<30}", " NORMAL "));
+        assert!((0..30).all(|column| buffer[(column, 0)].bg == theme.status_bar_background));
+        assert!((0..30).all(|column| buffer[(column, 1)].bg == theme.background));
+        assert!((8..30).all(|column| buffer[(column, 2)].bg == theme.status_bar_background));
+        assert!((0..8).all(|column| buffer[(column, 2)].bg == theme.mode_background));
         assert_eq!(buffer[(1, 0)].fg, theme.foreground);
         assert_eq!(buffer[(13, 0)].fg, theme.foreground_muted);
+        assert_eq!(buffer[(1, 2)].fg, theme.mode_foreground);
         assert!(buffer[(1, 0)].modifier.contains(Modifier::BOLD));
+        assert!(buffer[(1, 2)].modifier.contains(Modifier::BOLD));
     }
 }
 
