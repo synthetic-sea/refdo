@@ -6,7 +6,13 @@ use std::{io, time::Duration};
 
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    crossterm::{
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+            MouseButton, MouseEvent, MouseEventKind,
+        },
+        execute,
+    },
     layout::{Constraint, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
@@ -64,6 +70,8 @@ struct App {
     input_mode: InputMode,
     data_version: i64,
     error: Option<String>,
+    pointer_position: Option<Position>,
+    frame_area: Rect,
 }
 
 impl Default for App {
@@ -126,30 +134,40 @@ impl App {
             input_mode: InputMode::Normal,
             data_version,
             error,
+            pointer_position: None,
+            frame_area: Rect::default(),
         }
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
+        if let Err(error) = execute!(terminal.backend_mut(), EnableMouseCapture) {
+            let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+            return Err(error);
         }
-        Ok(())
+
+        let result = (|| {
+            while !self.exit {
+                terminal.draw(|frame| self.draw(frame))?;
+                self.handle_events()?;
+            }
+            Ok(())
+        })();
+        let disable_result = execute!(terminal.backend_mut(), DisableMouseCapture);
+        result.and(disable_result)
     }
 
-    fn draw(&self, frame: &mut Frame) {
-        let [status_area, content_area, footer_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
+    fn draw(&mut self, frame: &mut Frame) {
+        self.frame_area = frame.area();
+        let hovered = self
+            .pointer_position
+            .and_then(|position| self.focus_at(position));
+        let [status_area, content_area, footer_area] = app_areas(self.frame_area);
 
         render_status_bar(frame, status_area, &self.repository.head_label, &self.theme);
         let content_block = Block::bordered()
             .style(Style::default().bg(self.theme.background))
             .border_style(Style::default().fg(self.theme.foreground));
-        let todo_area = content_block.inner(content_area);
+        let todo_area = todo_viewport_area(self.frame_area);
         frame.render_widget(content_block, content_area);
         render_branch_sections(
             frame,
@@ -157,6 +175,7 @@ impl App {
             &self.repository.sections,
             &self.todos,
             self.focus.as_ref(),
+            hovered.as_ref(),
             self.draft.as_ref(),
             &self.theme,
         );
@@ -170,13 +189,41 @@ impl App {
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
-        if event::poll(Duration::from_millis(75))?
-            && let Event::Key(key) = event::read()?
-        {
-            self.handle_key_event(key);
+        if event::poll(Duration::from_millis(75))? {
+            match event::read()? {
+                Event::Key(key) => self.handle_key_event(key),
+                Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
+                _ => {}
+            }
         }
         self.refresh_external();
         Ok(())
+    }
+
+    fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        let position = Position::new(mouse_event.column, mouse_event.row);
+        self.pointer_position = Some(position);
+        if self.input_mode == InputMode::Normal
+            && mouse_event.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(focus) = self.focus_at(position)
+        {
+            self.focus = Some(focus);
+        }
+    }
+
+    fn focus_at(&self, position: Position) -> Option<Focus> {
+        let area = todo_viewport_area(self.frame_area);
+        if !area.contains(position) {
+            return None;
+        }
+        let rows = display_rows(&self.repository.sections, &self.todos, self.draft.as_ref());
+        let first = viewport_start(&rows, area.height, self.focus.as_ref(), self.draft.as_ref());
+        let row = rows.get(first + usize::from(position.y - area.y))?;
+        match row {
+            DisplayRow::Header(section) => Some(Focus::Branch(section.full_ref_name.clone())),
+            DisplayRow::Todo(todo) => Some(Focus::Todo(todo.id)),
+            DisplayRow::Draft(_) | DisplayRow::Empty => None,
+        }
     }
 
     fn refresh_external(&mut self) {
@@ -464,6 +511,20 @@ fn boundary_at_or_after(text: &str, cursor: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+fn app_areas(area: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(area)
+}
+
+fn todo_viewport_area(frame_area: Rect) -> Rect {
+    let [_, content_area, _] = app_areas(frame_area);
+    Block::bordered().inner(content_area)
+}
+
 fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.status_bar_background)),
@@ -557,6 +618,30 @@ fn display_rows<'a>(
     }
     rows
 }
+fn viewport_start(
+    rows: &[DisplayRow<'_>],
+    height: u16,
+    focus: Option<&Focus>,
+    draft: Option<&Draft>,
+) -> usize {
+    rows.iter()
+        .position(|row| match row {
+            DisplayRow::Header(section) => {
+                draft.is_none()
+                    && matches!(focus, Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name)
+            }
+            DisplayRow::Todo(todo) => {
+                draft.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id)
+            }
+            DisplayRow::Draft(_) => true,
+            DisplayRow::Empty => false,
+        })
+        .map(|row| {
+            row.saturating_add(1)
+                .saturating_sub(usize::from(height))
+        })
+        .unwrap_or(0)
+}
 
 fn render_branch_sections(
     frame: &mut Frame,
@@ -564,6 +649,7 @@ fn render_branch_sections(
     sections: &[BranchSection],
     todos: &[Todo],
     focus: Option<&Focus>,
+    hovered: Option<&Focus>,
     draft: Option<&Draft>,
     theme: &Theme,
 ) {
@@ -587,23 +673,7 @@ fn render_branch_sections(
     }
 
     let rows = display_rows(sections, todos, draft);
-    let focused_row = rows.iter().position(|row| match row {
-        DisplayRow::Header(section) => {
-            draft.is_none()
-                && matches!(focus, Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name)
-        }
-        DisplayRow::Todo(todo) => {
-            draft.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id)
-        }
-        DisplayRow::Draft(_) => true,
-        DisplayRow::Empty => false,
-    });
-    let first = focused_row
-        .map(|row| {
-            row.saturating_add(1)
-                .saturating_sub(usize::from(area.height))
-        })
-        .unwrap_or(0);
+    let first = viewport_start(&rows, area.height, focus, draft);
 
     for (visible, row) in rows
         .iter()
@@ -616,13 +686,20 @@ fn render_branch_sections(
             DisplayRow::Header(section) => {
                 let selected = draft.is_none()
                     && matches!(focus, Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name);
-                render_branch_header(frame, row_area, section, selected, theme);
+                let hovered = matches!(
+                    hovered,
+                    Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name
+                );
+                render_branch_header(frame, row_area, section, selected, hovered, theme);
             }
             DisplayRow::Todo(todo) => {
                 let selected =
                     draft.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id);
+                let hovered = matches!(hovered, Some(Focus::Todo(id)) if *id == todo.id);
                 let background = if selected {
                     theme.selection_background
+                } else if hovered {
+                    theme.hover_background
                 } else {
                     theme.background
                 };
@@ -658,10 +735,13 @@ fn render_branch_header(
     area: Rect,
     section: &BranchSection,
     selected: bool,
+    hovered: bool,
     theme: &Theme,
 ) {
     let background = if selected {
         theme.selection_background
+    } else if hovered {
+        theme.hover_background
     } else {
         theme.background
     };
@@ -746,7 +826,7 @@ mod tests {
     use ratatui::{
         Terminal,
         backend::{Backend, TestBackend},
-        crossterm::event::KeyModifiers,
+        crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
         style::Color,
     };
 
@@ -757,6 +837,7 @@ mod tests {
             background: Color::Red,
             foreground: Color::Green,
             foreground_muted: Color::Blue,
+            hover_background: Color::LightCyan,
             selection_background: Color::LightYellow,
             status_bar_background: Color::Yellow,
             mode_background: Color::Magenta,
@@ -796,6 +877,8 @@ mod tests {
             input_mode: InputMode::Normal,
             data_version: 0,
             error: None,
+            pointer_position: None,
+            frame_area: Rect::default(),
         }
     }
 
@@ -806,6 +889,15 @@ mod tests {
     fn type_text(app: &mut App, text: &str) {
         for character in text.chars() {
             app.handle_key_event(key(KeyCode::Char(character)));
+        }
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
         }
     }
 
@@ -1183,6 +1275,135 @@ mod tests {
     }
 
     #[test]
+    fn hover_background_applies_to_unselected_todo_and_branch_rows() {
+        let mut app = app_with_sections(vec![section("main"), section("topic")]);
+        app.store
+            .insert_todo("refs/heads/main", "hover me", None)
+            .unwrap();
+        app.reload();
+        let theme = app.theme;
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 2, 3));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 3).contains("[ ] hover me"));
+        assert_eq!(
+            terminal.backend().buffer()[(2, 3)].bg,
+            theme.hover_background
+        );
+
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 2, 4));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 4).contains("topic"));
+        assert_eq!(
+            terminal.backend().buffer()[(2, 4)].bg,
+            theme.hover_background
+        );
+    }
+
+    #[test]
+    fn selected_background_takes_precedence_over_hover() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let theme = app.theme;
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 2, 2));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert_eq!(
+            terminal.backend().buffer()[(2, 2)].bg,
+            theme.selection_background
+        );
+        assert_ne!(
+            terminal.backend().buffer()[(2, 2)].bg,
+            theme.hover_background
+        );
+    }
+
+    #[test]
+    fn normal_left_click_selects_the_rendered_row() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "click me", None)
+            .unwrap();
+        app.reload();
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+    }
+
+    #[test]
+    fn insert_mode_click_does_not_change_focus() {
+        let mut app = app_with_sections(vec![section("main"), section("topic")]);
+        app.handle_key_event(key(KeyCode::Char('o')));
+        let original_focus = app.focus.clone();
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 4).contains("topic"));
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 4));
+
+        assert_eq!(app.input_mode, InputMode::Insert);
+        assert_eq!(app.focus, original_focus);
+    }
+
+    #[test]
+    fn clicks_on_empty_rows_and_outside_the_viewport_do_not_change_focus() {
+        let mut app = app_with_sections(vec![section("main"), section("topic")]);
+        let topic = Focus::Branch("refs/heads/topic".to_owned());
+        app.focus = Some(topic.clone());
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 3).contains("No todos"));
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        assert_eq!(app.focus, Some(topic.clone()));
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 0, 2));
+        assert_eq!(app.focus, Some(topic.clone()));
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 39, 2));
+        assert_eq!(app.focus, Some(topic));
+    }
+
+    #[test]
+    fn click_hit_testing_uses_the_focus_driven_scroll_offset() {
+        let mut app = app_with_sections(vec![section("main"), section("topic"), section("third")]);
+        for branch in ["main", "topic", "third"] {
+            app.store
+                .insert_todo(
+                    &format!("refs/heads/{branch}"),
+                    &format!("{branch} todo"),
+                    None,
+                )
+                .unwrap();
+        }
+        app.reload();
+        app.focus = Some(Focus::Branch("refs/heads/third".to_owned()));
+        let backend = TestBackend::new(40, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 2).contains("topic"));
+        assert!(row_text(&terminal, 4).contains("third"));
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/topic".to_owned()))
+        );
+    }
+
+    #[test]
     fn narrow_header_hides_tag_and_stored_scope_shows_branch_tag() {
         let theme = test_theme();
         let normal = section("very-long-branch");
@@ -1194,7 +1415,7 @@ mod tests {
             is_locked: false,
             is_stored_only: true,
         };
-        let app = app_with_sections(vec![normal, stored]);
+        let mut app = app_with_sections(vec![normal, stored]);
         let backend = TestBackend::new(21, 9);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
