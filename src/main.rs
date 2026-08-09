@@ -4,7 +4,7 @@ use std::io;
 
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
@@ -13,11 +13,28 @@ use ratatui::{
 
 use theme::{TOKYO_NIGHT_DAY, Theme};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum InputMode {
+    #[default]
+    Normal,
+    Insert,
+}
+
+impl InputMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Normal => " NORMAL ",
+            Self::Insert => " INSERT ",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct App {
     exit: bool,
     branch: String,
     theme: Theme,
+    input_mode: InputMode,
 }
 
 impl Default for App {
@@ -32,6 +49,7 @@ impl App {
             exit: false,
             branch: current_branch(),
             theme,
+            input_mode: InputMode::Normal,
         }
     }
 
@@ -57,18 +75,34 @@ impl App {
             Block::default().style(Style::default().bg(self.theme.background)),
             content_area,
         );
-        render_footer(frame, footer_area, &self.theme);
+        render_footer(frame, footer_area, self.input_mode, &self.theme);
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
-        if let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-        {
-            self.exit = true;
+        if let Event::Key(key) = event::read()? {
+            self.handle_key_event(key);
         }
 
         Ok(())
+    }
+
+    fn handle_key_event(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+
+        match self.input_mode {
+            InputMode::Normal => match key.code {
+                KeyCode::Char('o') => self.input_mode = InputMode::Insert,
+                KeyCode::Char('q') => self.exit = true,
+                _ => {}
+            },
+            InputMode::Insert => {
+                if key.code == KeyCode::Esc {
+                    self.input_mode = InputMode::Normal;
+                }
+            }
+        }
     }
 }
 
@@ -104,9 +138,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme)
     );
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme) {
+fn render_footer(frame: &mut Frame, area: Rect, input_mode: InputMode, theme: &Theme) {
     let mode = Span::styled(
-        " NORMAL ",
+        input_mode.label(),
         Style::default()
             .fg(theme.mode_foreground)
             .bg(theme.mode_background)
@@ -164,6 +198,7 @@ mod tests {
             exit: false,
             branch: "feature/auth".to_owned(),
             theme,
+            input_mode: InputMode::Normal,
         };
         let backend = TestBackend::new(30, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -189,6 +224,42 @@ mod tests {
         assert_eq!(buffer[(1, 2)].fg, theme.mode_foreground);
         assert!(buffer[(1, 0)].modifier.contains(Modifier::BOLD));
         assert!(buffer[(1, 2)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn normal_and_insert_modes_transition_without_quitting() {
+        use ratatui::crossterm::event::KeyModifiers;
+
+        let mut app = App {
+            exit: false,
+            branch: "feature/auth".to_owned(),
+            theme: TOKYO_NIGHT_DAY,
+            input_mode: InputMode::Normal,
+        };
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::Insert);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.exit);
+
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let footer = (0..20)
+            .map(|column| terminal.backend().buffer()[(column, 2)].symbol())
+            .collect::<String>();
+        assert_eq!(footer, format!("{:<20}", " INSERT "));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(!app.exit);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.exit);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.exit);
     }
 }
 
