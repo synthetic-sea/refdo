@@ -545,14 +545,14 @@ fn display_rows<'a>(
             rows.push(DisplayRow::Empty);
             continue;
         }
+        if branch_draft.is_some_and(|draft| draft.after.is_none()) {
+            rows.push(DisplayRow::Draft(branch_draft.expect("checked above")));
+        }
         for todo in branch_todos {
             rows.push(DisplayRow::Todo(todo));
             if branch_draft.is_some_and(|draft| draft.after == Some(todo.id)) {
                 rows.push(DisplayRow::Draft(branch_draft.expect("checked above")));
             }
-        }
-        if branch_draft.is_some_and(|draft| draft.after.is_none()) {
-            rows.push(DisplayRow::Draft(branch_draft.expect("checked above")));
         }
     }
     rows
@@ -817,18 +817,46 @@ mod tests {
     }
 
     #[test]
-    fn header_append_is_only_persisted_on_enter_and_chains_entries() {
+    fn header_creation_inserts_first_and_chains_entries() {
         let mut app = app_with_sections(vec![section("main")]);
+        let existing_first = app
+            .store
+            .insert_todo("refs/heads/main", "existing first", None)
+            .unwrap();
+        app.store
+            .insert_todo(
+                "refs/heads/main",
+                "existing second",
+                Some(existing_first.id),
+            )
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "first");
-        assert!(app.store.load_all().unwrap().is_empty());
+        assert_eq!(
+            app.store
+                .load_all()
+                .unwrap()
+                .iter()
+                .map(|todo| todo.title.as_str())
+                .collect::<Vec<_>>(),
+            ["existing first", "existing second"]
+        );
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 3).contains("[ ] first"));
+        assert!(row_text(&terminal, 4).contains("[ ] existing first"));
+
         app.handle_key_event(key(KeyCode::Enter));
         assert_eq!(
             app.todos
                 .iter()
                 .map(|todo| todo.title.as_str())
                 .collect::<Vec<_>>(),
-            ["first"]
+            ["first", "existing first", "existing second"]
         );
         assert_eq!(app.input_mode, InputMode::Insert);
         type_text(&mut app, "second");
@@ -838,7 +866,7 @@ mod tests {
                 .iter()
                 .map(|todo| todo.title.as_str())
                 .collect::<Vec<_>>(),
-            ["first", "second"]
+            ["first", "second", "existing first", "existing second"]
         );
     }
 

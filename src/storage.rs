@@ -140,9 +140,7 @@ impl TodoStore {
         )?;
 
         let sort_order = match after {
-            None => maximum_order
-                .checked_add(1)
-                .ok_or(StoreError::OrderingOverflow)?,
+            None => 0,
             Some(anchor_id) => {
                 let anchor = transaction
                     .query_row(
@@ -159,34 +157,32 @@ impl TodoStore {
                         actual_branch_ref: anchor.0,
                     });
                 }
-
-                let sort_order = anchor
+                anchor
                     .1
                     .checked_add(1)
-                    .ok_or(StoreError::OrderingOverflow)?;
-                if sort_order <= maximum_order {
-                    let offset = maximum_order
-                        .checked_add(2)
-                        .ok_or(StoreError::OrderingOverflow)?;
-                    maximum_order
-                        .checked_add(offset)
-                        .ok_or(StoreError::OrderingOverflow)?;
-                    transaction.execute(
-                        "UPDATE todos
-                         SET sort_order = sort_order + ?1
-                         WHERE branch_ref = ?2 AND sort_order >= ?3",
-                        params![offset, branch_ref, sort_order],
-                    )?;
-                    transaction.execute(
-                        "UPDATE todos
-                         SET sort_order = sort_order - ?1 + 1
-                         WHERE branch_ref = ?2 AND sort_order >= ?1",
-                        params![offset, branch_ref],
-                    )?;
-                }
-                sort_order
+                    .ok_or(StoreError::OrderingOverflow)?
             }
         };
+        if sort_order <= maximum_order {
+            let offset = maximum_order
+                .checked_add(2)
+                .ok_or(StoreError::OrderingOverflow)?;
+            maximum_order
+                .checked_add(offset)
+                .ok_or(StoreError::OrderingOverflow)?;
+            transaction.execute(
+                "UPDATE todos
+                 SET sort_order = sort_order + ?1
+                 WHERE branch_ref = ?2 AND sort_order >= ?3",
+                params![offset, branch_ref, sort_order],
+            )?;
+            transaction.execute(
+                "UPDATE todos
+                 SET sort_order = sort_order - ?1 + 1
+                 WHERE branch_ref = ?2 AND sort_order >= ?1",
+                params![offset, branch_ref],
+            )?;
+        }
 
         transaction.execute(
             "INSERT INTO todos (branch_ref, title, sort_order) VALUES (?1, ?2, ?3)",
@@ -327,13 +323,15 @@ mod tests {
     }
 
     #[test]
-    fn appends_and_inserts_after_stable_id() {
+    fn inserts_first_and_after_stable_id() {
         let mut store = TodoStore::open_in_memory().unwrap();
-        let first = store.insert_todo("refs/heads/main", "first", None).unwrap();
-        let third = store.insert_todo("refs/heads/main", "third", None).unwrap();
         let second = store
-            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .insert_todo("refs/heads/main", "second", None)
             .unwrap();
+        let third = store
+            .insert_todo("refs/heads/main", "third", Some(second.id))
+            .unwrap();
+        let first = store.insert_todo("refs/heads/main", "first", None).unwrap();
         store
             .insert_todo("refs/heads/other", "other", None)
             .unwrap();
