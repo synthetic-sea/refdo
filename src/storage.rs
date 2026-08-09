@@ -36,7 +36,7 @@ impl fmt::Display for StoreError {
                 write!(f, "failed to create todo database directory: {error}")
             }
             Self::EmptyTitle => f.write_str("todo title must not be empty"),
-            Self::TodoNotFound(id) => write!(f, "todo anchor {id} does not exist"),
+            Self::TodoNotFound(id) => write!(f, "todo {id} does not exist"),
             Self::AnchorBranchMismatch {
                 id,
                 expected_branch_ref,
@@ -204,6 +204,33 @@ impl TodoStore {
         })
     }
 
+    pub fn toggle_todo(&mut self, id: TodoId) -> Result<Todo, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let todo = transaction
+            .query_row(
+                "UPDATE todos
+                 SET completed = 1 - completed
+                 WHERE id = ?1
+                 RETURNING id, branch_ref, title, completed, sort_order",
+                [id],
+                |row| {
+                    Ok(Todo {
+                        id: row.get(0)?,
+                        branch_ref: row.get(1)?,
+                        title: row.get(2)?,
+                        completed: row.get(3)?,
+                        sort_order: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::TodoNotFound(id))?;
+        transaction.commit()?;
+        Ok(todo)
+    }
+
     pub fn data_version(&self) -> Result<i64, StoreError> {
         Ok(self
             .connection
@@ -346,6 +373,39 @@ mod tests {
             Err(StoreError::EmptyTitle)
         ));
         assert_eq!(store.load_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn toggles_todo_completion_without_changing_other_fields() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let inserted = store
+            .insert_todo("refs/heads/feature", "persistent identity", None)
+            .unwrap();
+
+        let completed = store.toggle_todo(inserted.id).unwrap();
+        assert_eq!(
+            completed,
+            super::Todo {
+                completed: true,
+                ..inserted.clone()
+            }
+        );
+        assert_eq!(store.load_all().unwrap(), vec![completed]);
+
+        let incomplete = store.toggle_todo(inserted.id).unwrap();
+        assert_eq!(incomplete, inserted);
+        assert_eq!(store.load_all().unwrap(), vec![incomplete]);
+    }
+
+    #[test]
+    fn toggling_a_missing_todo_returns_not_found() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+
+        assert!(matches!(
+            store.toggle_todo(42),
+            Err(StoreError::TodoNotFound(42))
+        ));
+        assert!(store.load_all().unwrap().is_empty());
     }
 
     #[test]

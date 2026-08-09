@@ -351,6 +351,26 @@ impl App {
         }
     }
 
+    fn toggle_focused_todo(&mut self) {
+        if !self.persistence_available {
+            return;
+        }
+
+        let Some(Focus::Todo(id)) = self.focus.as_ref() else {
+            return;
+        };
+        let id = *id;
+        match self.store.toggle_todo(id) {
+            Ok(todo) => {
+                if let Some(existing) = self.todos.iter_mut().find(|todo| todo.id == id) {
+                    *existing = todo;
+                }
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
     fn handle_key_event(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -360,6 +380,7 @@ impl App {
                 KeyCode::Char('j') => self.move_focus(1),
                 KeyCode::Char('k') => self.move_focus(-1),
                 KeyCode::Char('o') => self.open_draft(),
+                KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
                 KeyCode::Char('q') => self.exit = true,
                 _ => {}
             },
@@ -866,6 +887,99 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.draft.is_none());
         assert_eq!(app.error.as_deref(), Some("database unavailable"));
+    }
+
+    #[test]
+    fn normal_mode_toggles_focused_todo_and_persists_each_state() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "toggle me", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(todo.id));
+        app.error = Some("old error".to_owned());
+
+        app.handle_key_event(key(KeyCode::Char('x')));
+
+        assert!(
+            app.todos
+                .iter()
+                .find(|item| item.id == todo.id)
+                .unwrap()
+                .completed
+        );
+        assert!(app.store.load_all().unwrap()[0].completed);
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+        assert!(app.error.is_none());
+        let backend = TestBackend::new(40, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 2).contains("[x] toggle me"));
+
+        app.handle_key_event(key(KeyCode::Char(' ')));
+
+        assert!(
+            !app.todos
+                .iter()
+                .find(|item| item.id == todo.id)
+                .unwrap()
+                .completed
+        );
+        assert!(!app.store.load_all().unwrap()[0].completed);
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 2).contains("[ ] toggle me"));
+    }
+
+    #[test]
+    fn toggle_keys_are_no_ops_on_branch_headers_or_without_persistence() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "unchanged", None)
+            .unwrap();
+        app.reload();
+        app.error = Some("existing error".to_owned());
+
+        app.handle_key_event(key(KeyCode::Char('x')));
+        app.handle_key_event(key(KeyCode::Char(' ')));
+
+        assert!(!app.store.load_all().unwrap()[0].completed);
+        assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
+        assert_eq!(app.error.as_deref(), Some("existing error"));
+
+        app.focus = Some(Focus::Todo(todo.id));
+        app.persistence_available = false;
+        app.handle_key_event(key(KeyCode::Char('x')));
+        assert!(!app.store.load_all().unwrap()[0].completed);
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+        assert_eq!(app.error.as_deref(), Some("existing error"));
+    }
+
+    #[test]
+    fn insert_mode_accepts_x_and_space_as_text() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.handle_key_event(key(KeyCode::Char('o')));
+
+        app.handle_key_event(key(KeyCode::Char('x')));
+        app.handle_key_event(key(KeyCode::Char(' ')));
+
+        assert_eq!(app.input_mode, InputMode::Insert);
+        assert_eq!(app.draft.as_ref().unwrap().text, "x ");
+        assert!(app.store.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_toggle_preserves_focus_and_in_memory_state() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.focus = Some(Focus::Todo(i64::MAX));
+
+        app.handle_key_event(key(KeyCode::Char('x')));
+
+        assert_eq!(app.focus, Some(Focus::Todo(i64::MAX)));
+        assert!(app.todos.is_empty());
+        assert!(app.error.is_some());
     }
 
     #[test]
