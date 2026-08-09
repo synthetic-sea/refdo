@@ -526,7 +526,6 @@ enum DisplayRow<'a> {
     Todo(&'a Todo),
     Draft(&'a Draft),
     Empty,
-    Gap,
 }
 
 fn display_rows<'a>(
@@ -535,10 +534,7 @@ fn display_rows<'a>(
     draft: Option<&'a Draft>,
 ) -> Vec<DisplayRow<'a>> {
     let mut rows = Vec::new();
-    for (index, section) in sections.iter().enumerate() {
-        if index > 0 {
-            rows.push(DisplayRow::Gap);
-        }
+    for section in sections {
         rows.push(DisplayRow::Header(section));
         let branch_todos = todos
             .iter()
@@ -600,7 +596,7 @@ fn render_branch_sections(
             draft.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id)
         }
         DisplayRow::Draft(_) => true,
-        DisplayRow::Empty | DisplayRow::Gap => false,
+        DisplayRow::Empty => false,
     });
     let first = focused_row
         .map(|row| {
@@ -643,7 +639,6 @@ fn render_branch_sections(
                 );
             }
             DisplayRow::Draft(draft) => render_draft(frame, row_area, draft, theme),
-            DisplayRow::Gap => {}
             DisplayRow::Empty => {
                 frame.render_widget(
                     Paragraph::new("    No todos").style(
@@ -1178,8 +1173,8 @@ mod tests {
         assert!(row_text(&terminal, 1).starts_with('┌'));
         assert_eq!(terminal.backend().buffer()[(0, 1)].fg, theme.foreground);
         assert!(!row_text(&terminal, 2).contains("WORKTREE"));
-        assert_eq!(row_text(&terminal, 4), "│                   │");
-        assert!(row_text(&terminal, 5).contains("BRANCH"));
+        assert!(row_text(&terminal, 3).contains("No todos"));
+        assert!(row_text(&terminal, 4).contains("BRANCH"));
         assert!(row_text(&terminal, 7).starts_with('└'));
         assert_eq!(
             terminal.backend().buffer()[(1, 2)].bg,
