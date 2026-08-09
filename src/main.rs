@@ -1,33 +1,39 @@
+mod theme;
+
 use std::io;
 
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::{Block, Paragraph},
 };
 
-const BACKGROUND: Color = Color::Rgb(26, 27, 38);
-const FOREGROUND: Color = Color::Rgb(192, 202, 245);
-const FOREGROUND_DIM: Color = Color::Rgb(86, 95, 137);
+use theme::{TOKYO_NIGHT_DAY, Theme};
 
 #[derive(Debug)]
 struct App {
     exit: bool,
     branch: String,
+    theme: Theme,
 }
 
 impl Default for App {
     fn default() -> Self {
-        Self {
-            exit: false,
-            branch: current_branch(),
-        }
+        Self::new(TOKYO_NIGHT_DAY)
     }
 }
 
 impl App {
+    fn new(theme: Theme) -> Self {
+        Self {
+            exit: false,
+            branch: current_branch(),
+            theme,
+        }
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
@@ -41,9 +47,9 @@ impl App {
         let [status_area, content_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(frame.area());
 
-        render_status_bar(frame, status_area, &self.branch);
+        render_status_bar(frame, status_area, &self.branch, &self.theme);
         frame.render_widget(
-            Block::default().style(Style::default().bg(BACKGROUND)),
+            Block::default().style(Style::default().bg(self.theme.background)),
             content_area,
         );
     }
@@ -60,9 +66,9 @@ impl App {
     }
 }
 
-fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str) {
+fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme) {
     frame.render_widget(
-        Block::default().style(Style::default().bg(BACKGROUND)),
+        Block::default().style(Style::default().bg(theme.background)),
         area,
     );
 
@@ -73,8 +79,8 @@ fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str) {
         Paragraph::new(" tuido")
             .style(
                 Style::default()
-                    .fg(FOREGROUND)
-                    .bg(BACKGROUND)
+                    .fg(theme.foreground)
+                    .bg(theme.background)
                     .add_modifier(Modifier::BOLD),
             )
             .left_aligned(),
@@ -82,7 +88,11 @@ fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str) {
     );
     frame.render_widget(
         Paragraph::new(format!("git:{branch} "))
-            .style(Style::default().fg(FOREGROUND_DIM).bg(BACKGROUND))
+            .style(
+                Style::default()
+                    .fg(theme.foreground_muted)
+                    .bg(theme.background),
+            )
             .right_aligned(),
         context_area,
     );
@@ -111,20 +121,22 @@ fn current_branch() -> String {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     use super::*;
 
     #[test]
-    fn status_bar_spans_the_row_and_keeps_context_right_aligned() {
+    fn application_uses_the_supplied_theme_for_every_rendered_cell() {
+        let theme = Theme::new(Color::Red, Color::Green, Color::Blue);
+        let app = App {
+            exit: false,
+            branch: "feature/auth".to_owned(),
+            theme,
+        };
         let backend = TestBackend::new(30, 2);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal
-            .draw(|frame| {
-                render_status_bar(frame, Rect::new(0, 0, 30, 1), "feature/auth");
-            })
-            .unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
 
         let buffer = terminal.backend().buffer();
         let row = (0..30)
@@ -132,7 +144,11 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(row, " tuido       git:feature/auth ");
-        assert!((0..30).all(|column| buffer[(column, 0)].bg == BACKGROUND));
+        assert!(
+            (0..2).all(|row| (0..30).all(|column| buffer[(column, row)].bg == theme.background))
+        );
+        assert_eq!(buffer[(1, 0)].fg, theme.foreground);
+        assert_eq!(buffer[(13, 0)].fg, theme.foreground_muted);
         assert!(buffer[(1, 0)].modifier.contains(Modifier::BOLD));
     }
 }
