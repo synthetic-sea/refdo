@@ -31,6 +31,7 @@ const UNKNOWN_DATA_VERSION: i64 = -1;
 enum Mode {
     Normal,
     Insert(Editor),
+    Command(CommandLine),
 }
 
 impl Mode {
@@ -38,13 +39,14 @@ impl Mode {
         match self {
             Self::Normal => " NORMAL ",
             Self::Insert(_) => " INSERT ",
+            Self::Command(_) => " COMMAND ",
         }
     }
 
     const fn editor(&self) -> Option<&Editor> {
         match self {
-            Self::Normal => None,
             Self::Insert(editor) => Some(editor),
+            Self::Normal | Self::Command(_) => None,
         }
     }
 }
@@ -70,6 +72,13 @@ enum EditorTarget {
 #[derive(Clone, Debug)]
 struct Editor {
     target: EditorTarget,
+    text: String,
+    cursor: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CommandLine {
+    target_branch: Option<String>,
     text: String,
     cursor: usize,
 }
@@ -630,6 +639,88 @@ impl App {
         }
     }
 
+    fn open_command_line(&mut self) {
+        let target_branch = match self.focus.as_ref() {
+            Some(Focus::Branch(branch_ref))
+                if self
+                    .repository
+                    .sections
+                    .iter()
+                    .any(|section| section.full_ref_name == *branch_ref) =>
+            {
+                Some(branch_ref.clone())
+            }
+            Some(Focus::Todo(id)) => self
+                .todos
+                .iter()
+                .find(|todo| todo.id == *id)
+                .map(|todo| todo.branch_ref.clone()),
+            _ => None,
+        };
+        self.mode = Mode::Command(CommandLine {
+            target_branch,
+            text: String::new(),
+            cursor: 0,
+        });
+        self.pending_cut = false;
+        self.error = None;
+    }
+
+    fn discard_command_line(&mut self) {
+        self.mode = Mode::Normal;
+        self.error = None;
+    }
+
+    fn execute_command_line(&mut self) {
+        let Mode::Command(command) = &self.mode else {
+            return;
+        };
+        let name = command.text.trim().to_owned();
+        let target_branch = command.target_branch.clone();
+        self.mode = Mode::Normal;
+
+        if name.is_empty() {
+            self.error = None;
+            return;
+        }
+        if name != "clean" {
+            self.error = Some(format!("Unknown command: {name}"));
+            return;
+        }
+        if !self.persistence_available {
+            self.error = Some("clean: persistence unavailable".to_owned());
+            return;
+        }
+        let Some(target_branch) = target_branch else {
+            self.error = Some("clean: no focused branch".to_owned());
+            return;
+        };
+
+        let previous_focus = self.focus.clone();
+        match self.store.delete_completed_todos(&target_branch) {
+            Ok(removed) => {
+                if !self.reload() {
+                    return;
+                }
+                let focus_survives = previous_focus.as_ref().is_some_and(|focus| match focus {
+                    Focus::Branch(branch_ref) => self
+                        .repository
+                        .sections
+                        .iter()
+                        .any(|section| section.full_ref_name == *branch_ref),
+                    Focus::Todo(id) => self.todos.iter().any(|todo| todo.id == *id),
+                });
+                self.focus = if focus_survives {
+                    previous_focus
+                } else {
+                    Some(Focus::Branch(target_branch))
+                };
+                self.error = Some(format!("clean: removed {removed} completed items"));
+            }
+            Err(error) => self.error = Some(format!("clean: {error}")),
+        }
+    }
+
     fn handle_normal_key(&mut self, code: KeyCode) {
         if code == KeyCode::Char('d') {
             if self.pending_cut {
@@ -648,6 +739,7 @@ impl App {
             KeyCode::Char(']') => self.move_section_focus(true),
             KeyCode::Char('[') => self.move_section_focus(false),
             KeyCode::Char('o') => self.open_create_editor(),
+            KeyCode::Char(':') => self.open_command_line(),
             KeyCode::Char('i') => self.open_update_editor(),
             KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
             KeyCode::Char('p') => self.paste_cut_todo(true),
@@ -662,63 +754,80 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        if matches!(&self.mode, Mode::Normal) {
-            self.handle_normal_key(key.code);
-            return;
-        }
-        match key.code {
-            KeyCode::Enter => {
-                self.commit_editor();
+        match &self.mode {
+            Mode::Normal => {
+                self.handle_normal_key(key.code);
                 return;
             }
-            KeyCode::Esc => {
-                self.discard_editor();
-                return;
-            }
-            _ => {}
+            Mode::Command(_) => match key.code {
+                KeyCode::Enter => {
+                    self.execute_command_line();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.discard_command_line();
+                    return;
+                }
+                _ => {}
+            },
+            Mode::Insert(_) => match key.code {
+                KeyCode::Enter => {
+                    self.commit_editor();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.discard_editor();
+                    return;
+                }
+                _ => {}
+            },
         }
-        let Mode::Insert(editor) = &mut self.mode else {
-            return;
-        };
-        match key.code {
-            KeyCode::Char(character) => {
-                editor.text.insert(editor.cursor, character);
-                let insertion_end = editor.cursor + character.len_utf8();
-                editor.cursor = boundary_at_or_after(&editor.text, insertion_end);
+
+        match &mut self.mode {
+            Mode::Insert(editor) => edit_line(&mut editor.text, &mut editor.cursor, &key),
+            Mode::Command(command) => {
+                edit_line(&mut command.text, &mut command.cursor, &key);
             }
-            KeyCode::Backspace if editor.cursor > 0 => {
-                let previous = previous_boundary(&editor.text, editor.cursor);
-                editor.text.drain(previous..editor.cursor);
-                editor.cursor = previous;
-            }
-            KeyCode::Delete if editor.cursor < editor.text.len() => {
-                let next = next_boundary(&editor.text, editor.cursor);
-                editor.text.drain(editor.cursor..next);
-            }
-            KeyCode::Left
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
-            {
-                editor.cursor = previous_word_boundary(&editor.text, editor.cursor);
-            }
-            KeyCode::Right
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
-            {
-                editor.cursor = next_word_boundary(&editor.text, editor.cursor);
-            }
-            KeyCode::Left => {
-                editor.cursor = previous_boundary(&editor.text, editor.cursor);
-            }
-            KeyCode::Right => {
-                editor.cursor = next_boundary(&editor.text, editor.cursor);
-            }
-            KeyCode::Home => editor.cursor = 0,
-            KeyCode::End => editor.cursor = editor.text.len(),
-            _ => {}
+            Mode::Normal => {}
         }
+    }
+}
+
+fn edit_line(text: &mut String, cursor: &mut usize, key: &KeyEvent) {
+    match key.code {
+        KeyCode::Char(character) => {
+            text.insert(*cursor, character);
+            let insertion_end = *cursor + character.len_utf8();
+            *cursor = boundary_at_or_after(text, insertion_end);
+        }
+        KeyCode::Backspace if *cursor > 0 => {
+            let previous = previous_boundary(text, *cursor);
+            text.drain(previous..*cursor);
+            *cursor = previous;
+        }
+        KeyCode::Delete if *cursor < text.len() => {
+            let next = next_boundary(text, *cursor);
+            text.drain(*cursor..next);
+        }
+        KeyCode::Left
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+        {
+            *cursor = previous_word_boundary(text, *cursor);
+        }
+        KeyCode::Right
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+        {
+            *cursor = next_word_boundary(text, *cursor);
+        }
+        KeyCode::Left => *cursor = previous_boundary(text, *cursor),
+        KeyCode::Right => *cursor = next_boundary(text, *cursor),
+        KeyCode::Home => *cursor = 0,
+        KeyCode::End => *cursor = text.len(),
+        _ => {}
     }
 }
 
@@ -807,6 +916,25 @@ fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme)
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, mode: &Mode, error: Option<&str>, theme: &Theme) {
+    let footer_style = Style::default()
+        .fg(theme.foreground)
+        .bg(theme.status_bar_background);
+    if let Mode::Command(command) = mode {
+        frame.render_widget(
+            Paragraph::new(format!(":{}", command.text)).style(footer_style),
+            area,
+        );
+        if area.width > 0 && area.height > 0 {
+            let cursor_offset = 1 + command.text[..command.cursor].width();
+            let cursor_x = area
+                .x
+                .saturating_add(u16::try_from(cursor_offset).unwrap_or(u16::MAX))
+                .min(area.right().saturating_sub(1));
+            frame.set_cursor_position(Position::new(cursor_x, area.y));
+        }
+        return;
+    }
+
     let mode = Span::styled(
         mode.label(),
         Style::default()
@@ -818,11 +946,7 @@ fn render_footer(frame: &mut Frame, area: Rect, mode: &Mode, error: Option<&str>
         .map(|message| Span::styled(format!(" {message}"), Style::default().fg(theme.foreground)))
         .unwrap_or_default();
     frame.render_widget(
-        Paragraph::new(Line::from(vec![mode, error])).style(
-            Style::default()
-                .fg(theme.foreground)
-                .bg(theme.status_bar_background),
-        ),
+        Paragraph::new(Line::from(vec![mode, error])).style(footer_style),
         area,
     );
 }
@@ -1367,6 +1491,19 @@ mod tests {
 
     fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
+    }
+
+    fn command_line(app: &App) -> &CommandLine {
+        let Mode::Command(command) = &app.mode else {
+            panic!("expected command mode");
+        };
+        command
+    }
+
+    fn run_command(app: &mut App, command: &str) {
+        app.handle_key_event(key(KeyCode::Char(':')));
+        type_text(app, command);
+        app.handle_key_event(key(KeyCode::Enter));
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -2653,6 +2790,213 @@ mod tests {
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|frame| app.draw(frame)).unwrap();
         }
+    }
+
+    #[test]
+    fn command_mode_captures_branch_and_renders_text_and_cursor_in_footer() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.handle_key_event(key(KeyCode::Char(':')));
+
+        assert_eq!(
+            command_line(&app).target_branch.as_deref(),
+            Some("refs/heads/main")
+        );
+        let backend = TestBackend::new(30, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 5).starts_with(':'));
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            Position::new(1, 5)
+        );
+
+        type_text(&mut app, "clean");
+        assert_eq!(command_line(&app).text, "clean");
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 5).starts_with(":clean"));
+        assert!(!row_text(&terminal, 5).contains("COMMAND"));
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            Position::new(6, 5)
+        );
+    }
+
+    #[test]
+    fn command_editing_respects_unicode_boundaries_and_cancel_paths() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.handle_key_event(key(KeyCode::Char(':')));
+        type_text(&mut app, "a👩‍🔬b");
+        app.handle_key_event(key(KeyCode::Home));
+        app.handle_key_event(key(KeyCode::Right));
+        app.handle_key_event(key(KeyCode::Delete));
+        assert_eq!(command_line(&app).text, "ab");
+        assert_eq!(command_line(&app).cursor, 1);
+
+        type_text(&mut app, "界");
+        app.handle_key_event(key(KeyCode::Left));
+        app.handle_key_event(key(KeyCode::Backspace));
+        assert_eq!(command_line(&app).text, "界b");
+        assert_eq!(command_line(&app).cursor, 0);
+        app.handle_key_event(key(KeyCode::End));
+        assert_eq!(command_line(&app).cursor, "界b".len());
+        app.handle_key_event(key(KeyCode::Esc));
+        assert!(matches!(&app.mode, Mode::Normal));
+        assert_eq!(app.error, None);
+
+        app.handle_key_event(key(KeyCode::Char(':')));
+        type_text(&mut app, " \t ");
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(matches!(&app.mode, Mode::Normal));
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn unknown_command_returns_to_normal_and_is_visible_in_footer() {
+        let mut app = app_with_sections(vec![section("main")]);
+        run_command(&mut app, "  nope  ");
+
+        assert!(matches!(&app.mode, Mode::Normal));
+        assert_eq!(app.error.as_deref(), Some("Unknown command: nope"));
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 5).contains("Unknown command: nope"));
+    }
+
+    #[test]
+    fn command_target_resolves_from_headers_and_todos_when_opened() {
+        let mut app = app_with_sections(vec![section("main"), section("feature")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/feature", "feature work", None)
+            .unwrap();
+        app.reload();
+
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.handle_key_event(key(KeyCode::Char(':')));
+        assert_eq!(
+            command_line(&app).target_branch.as_deref(),
+            Some("refs/heads/main")
+        );
+        app.handle_key_event(key(KeyCode::Esc));
+
+        app.focus = Some(Focus::Todo(todo.id));
+        app.handle_key_event(key(KeyCode::Char(':')));
+        assert_eq!(
+            command_line(&app).target_branch.as_deref(),
+            Some("refs/heads/feature")
+        );
+    }
+
+    #[test]
+    fn clean_deletes_only_completed_target_branch_todos_and_persists() {
+        let mut app = app_with_sections(vec![section("main"), section("feature")]);
+        let completed = app
+            .store
+            .insert_todo("refs/heads/main", "done here", None)
+            .unwrap();
+        let active = app
+            .store
+            .insert_todo("refs/heads/main", "keep here", Some(completed.id))
+            .unwrap();
+        let elsewhere = app
+            .store
+            .insert_todo("refs/heads/feature", "done elsewhere", None)
+            .unwrap();
+        app.store.toggle_todo(completed.id).unwrap();
+        app.store.toggle_todo(elsewhere.id).unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(active.id));
+        app.cut_buffer = Some(active.clone());
+
+        run_command(&mut app, " clean ");
+
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![("keep here".to_owned(), false)]
+        );
+        assert_eq!(
+            branch_titles(&app, "refs/heads/feature"),
+            vec![("done elsewhere".to_owned(), true)]
+        );
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+        assert_eq!(app.focus, Some(Focus::Todo(active.id)));
+        assert_eq!(app.cut_buffer.as_ref().map(|todo| todo.id), Some(active.id));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("clean: removed 1 completed items")
+        );
+    }
+
+    #[test]
+    fn clean_reports_zero_matches_without_changing_state() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let active = app
+            .store
+            .insert_todo("refs/heads/main", "still active", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(active.id));
+        let before = app.todos.clone();
+
+        run_command(&mut app, "clean");
+
+        assert_eq!(app.todos, before);
+        assert_eq!(app.store.load_all().unwrap(), before);
+        assert_eq!(app.focus, Some(Focus::Todo(active.id)));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("clean: removed 0 completed items")
+        );
+    }
+
+    #[test]
+    fn clean_without_focus_or_persistence_fails_without_deleting() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let completed = app
+            .store
+            .insert_todo("refs/heads/main", "must remain", None)
+            .unwrap();
+        app.store.toggle_todo(completed.id).unwrap();
+        app.reload();
+        app.focus = None;
+        run_command(&mut app, "clean");
+        assert_eq!(app.error.as_deref(), Some("clean: no focused branch"));
+        assert_eq!(app.store.load_all().unwrap().len(), 1);
+        assert!(matches!(&app.mode, Mode::Normal));
+
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.persistence_available = false;
+        run_command(&mut app, "clean");
+        assert_eq!(app.error.as_deref(), Some("clean: persistence unavailable"));
+        assert_eq!(app.store.load_all().unwrap().len(), 1);
+        assert!(matches!(&app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn clean_repairs_deleted_todo_focus_to_target_header_and_keeps_cut_buffer() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let completed = app
+            .store
+            .insert_todo("refs/heads/main", "focused done", None)
+            .unwrap();
+        let cut = app
+            .store
+            .insert_todo("refs/heads/main", "cut sentinel", Some(completed.id))
+            .unwrap();
+        app.store.toggle_todo(completed.id).unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(completed.id));
+        app.cut_buffer = Some(cut.clone());
+
+        run_command(&mut app, "clean");
+
+        assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
+        assert_eq!(app.cut_buffer.as_ref().map(|todo| todo.id), Some(cut.id));
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![("cut sentinel".to_owned(), false)]
+        );
     }
 }
 

@@ -237,6 +237,18 @@ impl TodoStore {
         Ok(todo)
     }
 
+    pub fn delete_completed_todos(&mut self, branch_ref: &str) -> Result<usize, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted = transaction.execute(
+            "DELETE FROM todos WHERE branch_ref = ?1 AND completed = 1",
+            [branch_ref],
+        )?;
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
     pub fn update_todo_title(&mut self, id: TodoId, title: &str) -> Result<Todo, StoreError> {
         let title = title.trim();
         if title.is_empty() {
@@ -474,6 +486,48 @@ mod tests {
 
         assert_eq!(deleted, completed);
         assert_eq!(store.load_all().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn deletes_only_completed_todos_in_the_requested_branch() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let main_incomplete = store
+            .insert_todo("refs/heads/main", "main incomplete", None)
+            .unwrap();
+        let main_completed_first = store
+            .insert_todo_with_completion(
+                "refs/heads/main",
+                "main completed first",
+                true,
+                Some(main_incomplete.id),
+            )
+            .unwrap();
+        let _main_completed_second = store
+            .insert_todo_with_completion(
+                "refs/heads/main",
+                "main completed second",
+                true,
+                Some(main_completed_first.id),
+            )
+            .unwrap();
+        let feature_completed = store
+            .insert_todo_with_completion("refs/heads/feature", "feature completed", true, None)
+            .unwrap();
+        let feature_incomplete = store
+            .insert_todo(
+                "refs/heads/feature",
+                "feature incomplete",
+                Some(feature_completed.id),
+            )
+            .unwrap();
+        let expected = vec![feature_completed, feature_incomplete, main_incomplete];
+
+        let deleted = store.delete_completed_todos("refs/heads/main").unwrap();
+
+        assert_eq!(deleted, 2);
+        assert_eq!(store.load_all().unwrap(), expected);
+        assert_eq!(store.delete_completed_todos("refs/heads/main").unwrap(), 0);
+        assert_eq!(store.load_all().unwrap(), expected);
     }
 
     #[test]
