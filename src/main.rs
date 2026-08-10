@@ -82,6 +82,8 @@ struct App {
     todos: Vec<Todo>,
     focus: Option<Focus>,
     mode: Mode,
+    cut_buffer: Option<Todo>,
+    pending_cut: bool,
     theme: Theme,
     data_version: i64,
     error: Option<String>,
@@ -141,6 +143,8 @@ impl App {
             todos,
             focus: None,
             mode: Mode::Normal,
+            cut_buffer: None,
+            pending_cut: false,
             theme,
             data_version,
             error,
@@ -496,20 +500,122 @@ impl App {
         }
     }
 
+    fn cut_focused_todo(&mut self) {
+        if !self.persistence_available {
+            return;
+        }
+
+        let Some(Focus::Todo(id)) = self.focus.as_ref() else {
+            return;
+        };
+        let id = *id;
+        let focuses = self.flattened_focuses();
+        let removed_index = focuses
+            .iter()
+            .position(|candidate| candidate == &Focus::Todo(id));
+        match self.store.delete_todo(id) {
+            Ok(todo) => {
+                self.todos.retain(|candidate| candidate.id != id);
+                self.cut_buffer = Some(todo);
+                let remaining = self.flattened_focuses();
+                self.focus = removed_index
+                    .and_then(|index| remaining.get(index).or_else(|| remaining.last()))
+                    .cloned();
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn paste_cut_todo(&mut self, below: bool) {
+        if !self.persistence_available {
+            return;
+        }
+
+        let Some(cut) = self.cut_buffer.as_ref() else {
+            return;
+        };
+        let Some(focus) = self.focus.as_ref() else {
+            return;
+        };
+        let (branch_ref, after) = match focus {
+            Focus::Branch(branch_ref) => {
+                let after = if below {
+                    self.todos
+                        .iter()
+                        .filter(|todo| todo.branch_ref == *branch_ref)
+                        .max_by_key(|todo| (todo.sort_order, todo.id))
+                        .map(|todo| todo.id)
+                } else {
+                    None
+                };
+                (branch_ref.clone(), after)
+            }
+            Focus::Todo(id) => {
+                let Some(target) = self.todos.iter().find(|todo| todo.id == *id) else {
+                    return;
+                };
+                let after = if below {
+                    Some(*id)
+                } else {
+                    self.todos
+                        .iter()
+                        .filter(|todo| {
+                            todo.branch_ref == target.branch_ref
+                                && (todo.sort_order, todo.id) < (target.sort_order, target.id)
+                        })
+                        .max_by_key(|todo| (todo.sort_order, todo.id))
+                        .map(|todo| todo.id)
+                };
+                (target.branch_ref.clone(), after)
+            }
+        };
+
+        match self
+            .store
+            .insert_todo_with_completion(&branch_ref, &cut.title, cut.completed, after)
+        {
+            Ok(todo) => {
+                let pasted = todo.id;
+                self.integrate_todo(todo);
+                self.focus = Some(Focus::Todo(pasted));
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn handle_normal_key(&mut self, code: KeyCode) {
+        if code == KeyCode::Char('d') {
+            if self.pending_cut {
+                self.pending_cut = false;
+                self.cut_focused_todo();
+            } else {
+                self.pending_cut = true;
+            }
+            return;
+        }
+
+        self.pending_cut = false;
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
+            KeyCode::Char('o') => self.open_create_editor(),
+            KeyCode::Char('i') => self.open_update_editor(),
+            KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
+            KeyCode::Char('p') => self.paste_cut_todo(true),
+            KeyCode::Char('P') => self.paste_cut_todo(false),
+            KeyCode::Char('q') => self.exit = true,
+            _ => {}
+        }
+    }
+
     fn handle_key_event(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
         }
         if matches!(&self.mode, Mode::Normal) {
-            match key.code {
-                KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
-                KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
-                KeyCode::Char('o') => self.open_create_editor(),
-                KeyCode::Char('i') => self.open_update_editor(),
-                KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
-                KeyCode::Char('q') => self.exit = true,
-                _ => {}
-            }
+            self.handle_normal_key(key.code);
             return;
         }
         match key.code {
@@ -1187,6 +1293,8 @@ mod tests {
             todos: Vec::new(),
             focus,
             mode: Mode::Normal,
+            cut_buffer: None,
+            pending_cut: false,
             theme: test_theme(),
             data_version: 0,
             error: None,
@@ -1230,6 +1338,242 @@ mod tests {
         (0..buffer.area.width)
             .map(|column| buffer[(column, row)].symbol())
             .collect()
+    }
+
+    fn branch_titles(app: &App, branch_ref: &str) -> Vec<(String, bool)> {
+        app.todos
+            .iter()
+            .filter(|todo| todo.branch_ref == branch_ref)
+            .map(|todo| (todo.title.clone(), todo.completed))
+            .collect()
+    }
+
+    #[test]
+    fn dd_requires_consecutive_keys_and_focuses_the_next_row_after_cut() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        let second = app
+            .store
+            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(first.id));
+
+        app.handle_key_event(key(KeyCode::Char('d')));
+        assert!(app.pending_cut);
+        assert_eq!(app.store.load_all().unwrap().len(), 2);
+
+        app.handle_key_event(key(KeyCode::Char('j')));
+        assert!(!app.pending_cut);
+        assert_eq!(app.focus, Some(Focus::Todo(second.id)));
+        assert_eq!(app.store.load_all().unwrap().len(), 2);
+
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('k')));
+        assert_eq!(app.focus, Some(Focus::Todo(first.id)));
+        assert_eq!(app.store.load_all().unwrap().len(), 2);
+
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('d')));
+
+        assert!(!app.pending_cut);
+        assert_eq!(app.focus, Some(Focus::Todo(second.id)));
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![("second".to_owned(), false)]
+        );
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+        assert_eq!(
+            app.cut_buffer.as_ref().map(|todo| todo.title.as_str()),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn paste_register_persists_and_preserves_completion() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let completed = app
+            .store
+            .insert_todo("refs/heads/main", "repeat me", None)
+            .unwrap();
+        app.store.toggle_todo(completed.id).unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(completed.id));
+
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('d')));
+        let cut_id = app.cut_buffer.as_ref().unwrap().id;
+        assert!(app.store.load_all().unwrap().is_empty());
+
+        app.handle_key_event(key(KeyCode::Char('p')));
+        let first_paste = match app.focus {
+            Some(Focus::Todo(id)) => id,
+            _ => panic!("pasted todo must receive focus"),
+        };
+        app.handle_key_event(key(KeyCode::Char('p')));
+        let second_paste = match app.focus {
+            Some(Focus::Todo(id)) => id,
+            _ => panic!("pasted todo must receive focus"),
+        };
+
+        assert_ne!(first_paste, second_paste);
+        assert_eq!(app.cut_buffer.as_ref().unwrap().id, cut_id);
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![
+                ("repeat me".to_owned(), true),
+                ("repeat me".to_owned(), true)
+            ]
+        );
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+    }
+
+    #[test]
+    fn todo_paste_positions_above_and_below_in_another_section() {
+        let mut app = app_with_sections(vec![section("main"), section("topic")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        let second = app
+            .store
+            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .unwrap();
+        let source = app
+            .store
+            .insert_todo("refs/heads/topic", "source", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(source.id));
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('d')));
+
+        app.focus = Some(Focus::Todo(second.id));
+        app.handle_key_event(key(KeyCode::Char('P')));
+        let above = app.focus.clone();
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![
+                ("first".to_owned(), false),
+                ("source".to_owned(), false),
+                ("second".to_owned(), false)
+            ]
+        );
+
+        app.handle_key_event(key(KeyCode::Char('p')));
+        assert_ne!(app.focus, above);
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![
+                ("first".to_owned(), false),
+                ("source".to_owned(), false),
+                ("source".to_owned(), false),
+                ("second".to_owned(), false)
+            ]
+        );
+        assert!(branch_titles(&app, "refs/heads/topic").is_empty());
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+    }
+
+    #[test]
+    fn header_paste_uses_section_top_and_bottom() {
+        let mut app = app_with_sections(vec![section("main"), section("topic")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .unwrap();
+        let source = app
+            .store
+            .insert_todo("refs/heads/topic", "source", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(source.id));
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('d')));
+
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.handle_key_event(key(KeyCode::Char('P')));
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![
+                ("source".to_owned(), false),
+                ("first".to_owned(), false),
+                ("second".to_owned(), false)
+            ]
+        );
+
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.handle_key_event(key(KeyCode::Char('p')));
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![
+                ("source".to_owned(), false),
+                ("first".to_owned(), false),
+                ("second".to_owned(), false),
+                ("source".to_owned(), false)
+            ]
+        );
+        assert!(matches!(app.focus, Some(Focus::Todo(_))));
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+    }
+
+    #[test]
+    fn cut_paste_no_ops_and_failures_preserve_state() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.handle_key_event(key(KeyCode::Char('p')));
+        app.handle_key_event(key(KeyCode::Char('P')));
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('d')));
+        assert!(app.todos.is_empty());
+        assert!(app.cut_buffer.is_none());
+
+        let retained = app
+            .store
+            .insert_todo("refs/heads/main", "retained", None)
+            .unwrap();
+        app.reload();
+        app.cut_buffer = Some(retained.clone());
+        app.focus = Some(Focus::Todo(i64::MAX));
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('d')));
+
+        assert_eq!(app.cut_buffer, Some(retained.clone()));
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+        assert!(app.error.is_some());
+
+        let mut invalid_register = retained;
+        invalid_register.title = "   ".to_owned();
+        app.cut_buffer = Some(invalid_register.clone());
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        let todos_before_failed_paste = app.todos.clone();
+        app.handle_key_event(key(KeyCode::Char('p')));
+
+        assert_eq!(app.cut_buffer, Some(invalid_register));
+        assert_eq!(app.todos, todos_before_failed_paste);
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn insert_mode_treats_cut_and_paste_keys_as_text() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.handle_key_event(key(KeyCode::Char('o')));
+
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('d')));
+        app.handle_key_event(key(KeyCode::Char('p')));
+        app.handle_key_event(key(KeyCode::Char('P')));
+
+        assert_eq!(editor(&app).text, "ddpP");
+        assert!(!app.pending_cut);
+        assert!(app.cut_buffer.is_none());
+        assert!(app.store.load_all().unwrap().is_empty());
     }
 
     #[test]

@@ -125,6 +125,16 @@ impl TodoStore {
         title: &str,
         after: Option<TodoId>,
     ) -> Result<Todo, StoreError> {
+        self.insert_todo_with_completion(branch_ref, title, false, after)
+    }
+
+    pub fn insert_todo_with_completion(
+        &mut self,
+        branch_ref: &str,
+        title: &str,
+        completed: bool,
+        after: Option<TodoId>,
+    ) -> Result<Todo, StoreError> {
         let title = title.trim();
         if title.is_empty() {
             return Err(StoreError::EmptyTitle);
@@ -185,8 +195,9 @@ impl TodoStore {
         }
 
         transaction.execute(
-            "INSERT INTO todos (branch_ref, title, sort_order) VALUES (?1, ?2, ?3)",
-            params![branch_ref, title, sort_order],
+            "INSERT INTO todos (branch_ref, title, completed, sort_order)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![branch_ref, title, completed, sort_order],
         )?;
         let id = transaction.last_insert_rowid();
         transaction.commit()?;
@@ -195,9 +206,35 @@ impl TodoStore {
             id,
             branch_ref: branch_ref.to_owned(),
             title: title.to_owned(),
-            completed: false,
+            completed,
             sort_order,
         })
+    }
+
+    pub fn delete_todo(&mut self, id: TodoId) -> Result<Todo, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let todo = transaction
+            .query_row(
+                "DELETE FROM todos
+                 WHERE id = ?1
+                 RETURNING id, branch_ref, title, completed, sort_order",
+                [id],
+                |row| {
+                    Ok(Todo {
+                        id: row.get(0)?,
+                        branch_ref: row.get(1)?,
+                        title: row.get(2)?,
+                        completed: row.get(3)?,
+                        sort_order: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::TodoNotFound(id))?;
+        transaction.commit()?;
+        Ok(todo)
     }
 
     pub fn update_todo_title(&mut self, id: TodoId, title: &str) -> Result<Todo, StoreError> {
@@ -388,6 +425,69 @@ mod tests {
         assert_eq!(todos[0].id, first.id);
         assert_eq!(todos[1].id, second.id);
         assert_eq!(todos[2].id, third.id);
+    }
+
+    #[test]
+    fn inserts_with_completion_after_the_requested_todo() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let first = store.insert_todo("refs/heads/main", "first", None).unwrap();
+        let third = store
+            .insert_todo("refs/heads/main", "third", Some(first.id))
+            .unwrap();
+
+        let second = store
+            .insert_todo_with_completion("refs/heads/main", "second", false, Some(first.id))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .load_all()
+                .unwrap()
+                .iter()
+                .map(|todo| todo.id)
+                .collect::<Vec<_>>(),
+            vec![first.id, second.id, third.id]
+        );
+    }
+
+    #[test]
+    fn inserts_with_the_requested_completion_state() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+
+        let completed = store
+            .insert_todo_with_completion("refs/heads/main", "done", true, None)
+            .unwrap();
+
+        assert!(completed.completed);
+        assert_eq!(store.load_all().unwrap(), vec![completed]);
+    }
+
+    #[test]
+    fn deletes_and_returns_the_full_todo() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let first = store.insert_todo("refs/heads/main", "first", None).unwrap();
+        let completed = store
+            .insert_todo_with_completion("refs/heads/main", "done", true, Some(first.id))
+            .unwrap();
+
+        let deleted = store.delete_todo(completed.id).unwrap();
+
+        assert_eq!(deleted, completed);
+        assert_eq!(store.load_all().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn deleting_a_missing_todo_returns_not_found_without_modifying_data() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let existing = store
+            .insert_todo("refs/heads/main", "keep this", None)
+            .unwrap();
+
+        assert!(matches!(
+            store.delete_todo(existing.id + 1),
+            Err(StoreError::TodoNotFound(id)) if id == existing.id + 1
+        ));
+        assert_eq!(store.load_all().unwrap(), vec![existing]);
     }
 
     #[test]
