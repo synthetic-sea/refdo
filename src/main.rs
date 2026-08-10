@@ -372,6 +372,47 @@ impl App {
         self.focus = Some(rows[next].clone());
     }
 
+    fn move_section_focus(&mut self, forward: bool) {
+        let Some((current, on_header)) = self.focus.as_ref().and_then(|focus| match focus {
+            Focus::Branch(branch_ref) => self
+                .repository
+                .sections
+                .iter()
+                .position(|section| section.full_ref_name == *branch_ref)
+                .map(|index| (index, true)),
+            Focus::Todo(id) => self
+                .todos
+                .iter()
+                .find(|todo| todo.id == *id)
+                .and_then(|todo| {
+                    self.repository
+                        .sections
+                        .iter()
+                        .position(|section| section.full_ref_name == todo.branch_ref)
+                })
+                .map(|index| (index, false)),
+        }) else {
+            self.focus = if forward {
+                self.repository.sections.first()
+            } else {
+                self.repository.sections.last()
+            }
+            .map(|section| Focus::Branch(section.full_ref_name.clone()));
+            return;
+        };
+
+        let target = if forward {
+            current.checked_add(1)
+        } else if on_header {
+            current.checked_sub(1)
+        } else {
+            Some(current)
+        };
+        if let Some(section) = target.and_then(|index| self.repository.sections.get(index)) {
+            self.focus = Some(Focus::Branch(section.full_ref_name.clone()));
+        }
+    }
+
     fn open_create_editor(&mut self) {
         if !self.persistence_available {
             return;
@@ -604,6 +645,8 @@ impl App {
         match code {
             KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
+            KeyCode::Char(']') => self.move_section_focus(true),
+            KeyCode::Char('[') => self.move_section_focus(false),
             KeyCode::Char('o') => self.open_create_editor(),
             KeyCode::Char('i') => self.open_update_editor(),
             KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
@@ -2080,6 +2123,64 @@ mod tests {
         );
         app.handle_key_event(key(KeyCode::Char('k')));
         assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+    }
+
+    #[test]
+    fn bracket_navigation_moves_between_section_headers() {
+        let mut app = app_with_sections(vec![section("main"), section("topic"), section("third")]);
+
+        app.handle_key_event(key(KeyCode::Char(']')));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/topic".to_owned()))
+        );
+        app.handle_key_event(key(KeyCode::Char(']')));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/third".to_owned()))
+        );
+        app.handle_key_event(key(KeyCode::Char(']')));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/third".to_owned()))
+        );
+
+        app.handle_key_event(key(KeyCode::Char('[')));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/topic".to_owned()))
+        );
+        app.handle_key_event(key(KeyCode::Char('[')));
+        assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
+        app.handle_key_event(key(KeyCode::Char('[')));
+        assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
+    }
+
+    #[test]
+    fn bracket_navigation_uses_nearest_header_and_directional_edge() {
+        let mut app = app_with_sections(vec![section("main"), section("topic")]);
+        let topic_todo = app
+            .store
+            .insert_todo("refs/heads/topic", "topic todo", None)
+            .unwrap();
+        app.reload();
+
+        app.focus = Some(Focus::Todo(topic_todo.id));
+        app.handle_key_event(key(KeyCode::Char('[')));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/topic".to_owned()))
+        );
+
+        app.focus = None;
+        app.handle_key_event(key(KeyCode::Char(']')));
+        assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
+        app.focus = None;
+        app.handle_key_event(key(KeyCode::Char('[')));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/topic".to_owned()))
+        );
     }
 
     #[test]
