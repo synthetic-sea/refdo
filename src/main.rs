@@ -162,7 +162,7 @@ impl App {
         render_status_bar(frame, status_area, &self.repository.head_label, &self.theme);
         let content_block = Block::bordered()
             .style(Style::default().bg(self.theme.background))
-            .border_style(Style::default().fg(self.theme.foreground));
+            .border_style(Style::default().fg(self.theme.mode_background));
         let todo_area = todo_viewport_area(self.frame_area);
         frame.render_widget(content_block, content_area);
         render_branch_sections(
@@ -1604,7 +1604,10 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(row_text(&terminal, 1).starts_with('┌'));
-        assert_eq!(terminal.backend().buffer()[(0, 1)].fg, theme.foreground);
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            theme.mode_background
+        );
         assert!(!row_text(&terminal, 2).contains("WORKTREE"));
         assert!(row_text(&terminal, 3).contains("No todos"));
         assert!(row_text(&terminal, 4).contains("BRANCH"));
