@@ -357,7 +357,11 @@ impl App {
             .as_ref()
             .and_then(|focus| rows.iter().position(|row| row == focus))
         else {
-            self.focus = rows.into_iter().next();
+            self.focus = if delta < 0 {
+                rows.last().cloned()
+            } else {
+                rows.first().cloned()
+            };
             return;
         };
         let next = if delta < 0 {
@@ -2028,6 +2032,35 @@ mod tests {
         assert_eq!(input.cursor, input.text.len());
         app.handle_key_event(key(KeyCode::Backspace));
         assert!(editor(&app).text.is_empty());
+    }
+
+    #[test]
+    fn unselected_navigation_starts_at_directional_edge() {
+        let build_app = || {
+            let mut app = app_with_sections(vec![section("main"), section("topic")]);
+            app.store
+                .insert_todo("refs/heads/main", "top", None)
+                .unwrap();
+            let bottom = app
+                .store
+                .insert_todo("refs/heads/topic", "bottom", None)
+                .unwrap();
+            app.reload();
+            app.focus = None;
+            (app, bottom.id)
+        };
+
+        for code in [KeyCode::Char('j'), KeyCode::Down] {
+            let (mut app, _) = build_app();
+            app.handle_key_event(key(code));
+            assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
+        }
+
+        for code in [KeyCode::Char('k'), KeyCode::Up] {
+            let (mut app, bottom_id) = build_app();
+            app.handle_key_event(key(code));
+            assert_eq!(app.focus, Some(Focus::Todo(bottom_id)));
+        }
     }
 
     #[test]
