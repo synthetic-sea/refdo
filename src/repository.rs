@@ -190,7 +190,7 @@ mod tests {
         fn new() -> Self {
             let id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
             let base =
-                std::env::temp_dir().join(format!("tuido-worktrees-{}-{id}", std::process::id()));
+                std::env::temp_dir().join(format!("refdo-worktrees-{}-{id}", std::process::id()));
             let main = base.join("main");
             let feature = base.join("feature");
             let detached = base.join("detached");
@@ -203,9 +203,9 @@ mod tests {
                 &main,
                 &[
                     "-c",
-                    "user.name=Tuido",
+                    "user.name=Refdo",
                     "-c",
-                    "user.email=tuido@example.invalid",
+                    "user.email=refdo@example.invalid",
                     "commit",
                     "--allow-empty",
                     "-m",
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn includes_the_current_unborn_branch() {
         let id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!("tuido-unborn-{}-{id}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("refdo-unborn-{}-{id}", std::process::id()));
         let repository = base.join("repository");
         fs::create_dir_all(&base).unwrap();
         git(

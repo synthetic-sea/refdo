@@ -4,11 +4,11 @@ use super::*;
 #[test]
 fn refresh_loads_other_process_commits_and_adds_their_branch() {
     let directory = std::env::temp_dir().join(format!(
-        "tuido-main-refresh-{}-{:?}",
+        "refdo-main-refresh-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
-    let database = directory.join("todos.db");
+    let database = directory.join("data.db");
     let store = TodoStore::open(&database).unwrap();
     let mut app = app_with_sections(vec![section("main")]);
     app.store = store;
@@ -32,11 +32,11 @@ fn refresh_loads_other_process_commits_and_adds_their_branch() {
 #[test]
 fn refresh_retries_an_unknown_snapshot_without_a_new_commit() {
     let directory = std::env::temp_dir().join(format!(
-        "tuido-main-unknown-version-{}-{:?}",
+        "refdo-main-unknown-version-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
-    let database = directory.join("todos.db");
+    let database = directory.join("data.db");
     let mut writer = TodoStore::open(&database).unwrap();
     writer
         .insert_todo("refs/heads/main", "already committed", None)

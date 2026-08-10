@@ -475,9 +475,9 @@ mod tests {
         fn new() -> Self {
             let sequence = NEXT_DATABASE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir()
-                .join(format!("tuido-storage-{}-{sequence}", process::id()))
+                .join(format!("refdo-storage-{}-{sequence}", process::id()))
                 .join("nested")
-                .join("todos.db");
+                .join("data.db");
             Self { path }
         }
 

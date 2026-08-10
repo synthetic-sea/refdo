@@ -123,7 +123,7 @@ impl App {
                     false,
                 )
             } else {
-                let database_path = repository.common_git_dir.join("tuido").join("todos.db");
+                let database_path = repository.common_git_dir.join("refdo").join("data.db");
                 match TodoStore::open(&database_path) {
                     Ok(store) => (store, None, true),
                     Err(open_error) => (

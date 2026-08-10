@@ -1,6 +1,6 @@
-# tuido
+# refdo
 
-tuido is a Git-aware terminal todo manager. It organizes todos by branches checked out in a repository's worktrees; branches with saved todos remain listed, and all worktrees share the same repository-local data.
+refdo is a Git-aware terminal todo manager. It organizes todos by branches checked out in a repository's worktrees; branches with saved todos remain listed, and all worktrees share the same repository-local data.
 
 ## Install and run
 
@@ -12,10 +12,10 @@ Install from this checkout:
 cargo install --path .
 ```
 
-From a Git repository or worktree, start tuido with:
+From a Git repository or worktree, start refdo with:
 
 ```sh
-tuido
+refdo
 ```
 
 For development, run the checkout directly:
@@ -24,7 +24,7 @@ For development, run the checkout directly:
 cargo run --release
 ```
 
-Always launch tuido from within the Git repository or worktree whose todos you want to manage.
+Always launch refdo from within the Git repository or worktree whose todos you want to manage.
 
 ## Quick workflow
 
@@ -53,7 +53,7 @@ Always launch tuido from within the Git repository or worktree whose todos you w
 | `P` | Paste the cut todo above the selection; on a branch header, paste at the start of that branch. |
 | `:` | Open colon-command entry. |
 | `Esc` | Clear the current selection. |
-| `q` | Quit tuido. |
+| `q` | Quit refdo. |
 
 ### Text entry
 
@@ -90,6 +90,6 @@ In normal mode, click a row to select it. Use the mouse wheel over the todo list
 
 ## Storage
 
-tuido stores its database at `<git-common-dir>/tuido/todos.db`. The database is shared by the repository's worktrees, while each listed branch has its own todos. Because it lives in Git's common directory rather than the working tree, the database is not committed to Git.
+refdo stores its database at `<git-common-dir>/refdo/data.db`. The database is shared by the repository's worktrees, while each listed branch has its own todos. Because it lives in Git's common directory rather than the working tree, the database is not committed to Git.
 
-No persistence is available when tuido is run outside a Git repository.
+No persistence is available when refdo is run outside a Git repository.

@@ -30,7 +30,7 @@ pub(in crate::app) fn render_status_bar(
     let [brand_area, context_area] =
         Layout::horizontal([Constraint::Length(7), Constraint::Min(0)]).areas(area);
     frame.render_widget(
-        Paragraph::new(" tuido")
+        Paragraph::new(" refdo")
             .style(
                 Style::default()
                     .fg(theme.foreground)
