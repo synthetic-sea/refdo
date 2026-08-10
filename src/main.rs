@@ -889,7 +889,9 @@ fn display_rows<'a>(
     rows
 }
 
-const TODO_PREFIX_WIDTH: u16 = 8;
+const INCOMPLETE_TODO_MARKER: &str = "󰄱";
+const COMPLETE_TODO_MARKER: &str = "󰄲";
+const TODO_PREFIX_WIDTH: u16 = 6;
 
 struct DisplayRowLayout<'a> {
     row: DisplayRow<'a>,
@@ -1110,7 +1112,11 @@ fn render_branch_sections(
                 } else {
                     theme.background
                 };
-                let marker = if todo.completed { "[x]" } else { "[ ]" };
+                let marker = if todo.completed {
+                    COMPLETE_TODO_MARKER
+                } else {
+                    INCOMPLETE_TODO_MARKER
+                };
                 let foreground = if todo.completed {
                     theme.foreground_muted
                 } else {
@@ -1214,7 +1220,7 @@ fn render_branch_header(
         .bg(background)
         .add_modifier(Modifier::BOLD);
     frame.render_widget(
-        Paragraph::new(format!("▾ {}", section.display_name)).style(style),
+        Paragraph::new(format!("󰍝 {}", section.display_name)).style(style),
         branch_area,
     );
     if tag_width > 0 {
@@ -1236,7 +1242,11 @@ fn render_editor(
     cursor: (usize, usize),
     theme: &Theme,
 ) {
-    let marker = if completed { "[x]" } else { "[ ]" };
+    let marker = if completed {
+        COMPLETE_TODO_MARKER
+    } else {
+        INCOMPLETE_TODO_MARKER
+    };
     let background = theme.selection_background;
     let foreground = if completed {
         theme.foreground_muted
@@ -1678,8 +1688,8 @@ mod tests {
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(row_text(&terminal, 3).contains("[ ] first"));
-        assert!(row_text(&terminal, 4).contains("[ ] existing first"));
+        assert!(row_text(&terminal, 3).contains("󰄱 first"));
+        assert!(row_text(&terminal, 4).contains("󰄱 existing first"));
 
         app.handle_key_event(key(KeyCode::Enter));
         assert_eq!(
@@ -1885,12 +1895,13 @@ mod tests {
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 3).contains("[ ] first"));
-        assert!(row_text(&terminal, 4).contains("[x] second"));
-        assert!(!row_text(&terminal, 5).contains("["));
+        assert!(row_text(&terminal, 3).contains("󰄱 first"));
+        assert!(row_text(&terminal, 4).contains("󰄲 second"));
+        assert!(!row_text(&terminal, 5).contains("󰄱"));
+        assert!(!row_text(&terminal, 5).contains("󰄲"));
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position::new(15, 4)
+            Position::new(13, 4)
         );
         assert_eq!(app.focus, Some(Focus::Todo(second.id)));
     }
@@ -1921,13 +1932,13 @@ mod tests {
         let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(row_text(&terminal, 3).contains("[x] toggle me"));
+        assert!(row_text(&terminal, 3).contains("󰄲 toggle me"));
         assert_eq!(
             terminal.backend().buffer()[(5, 3)].fg,
             app.theme.foreground_muted
         );
         assert_eq!(
-            terminal.backend().buffer()[(9, 3)].fg,
+            terminal.backend().buffer()[(7, 3)].fg,
             app.theme.foreground_muted
         );
 
@@ -1943,9 +1954,9 @@ mod tests {
         assert!(!app.store.load_all().unwrap()[0].completed);
         assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(row_text(&terminal, 3).contains("[ ] toggle me"));
+        assert!(row_text(&terminal, 3).contains("󰄱 toggle me"));
         assert_eq!(terminal.backend().buffer()[(5, 3)].fg, app.theme.foreground);
-        assert_eq!(terminal.backend().buffer()[(9, 3)].fg, app.theme.foreground);
+        assert_eq!(terminal.backend().buffer()[(7, 3)].fg, app.theme.foreground);
     }
 
     #[test]
@@ -2237,9 +2248,9 @@ mod tests {
 
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position::new(10, 2)
+            Position::new(9, 2)
         );
-        assert_eq!(terminal.backend().buffer()[(9, 2)].symbol(), "👩‍🔬");
+        assert_eq!(terminal.backend().buffer()[(7, 2)].symbol(), "👩‍🔬");
     }
 
     #[test]
@@ -2308,7 +2319,7 @@ mod tests {
 
         app.handle_mouse_event(mouse(MouseEventKind::Moved, 2, 3));
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(row_text(&terminal, 3).contains("[ ] hover me"));
+        assert!(row_text(&terminal, 3).contains("󰄱 hover me"));
         assert_eq!(
             terminal.backend().buffer()[(2, 3)].bg,
             theme.hover_background
@@ -2465,6 +2476,7 @@ mod tests {
             theme.mode_background
         );
         assert!(!row_text(&terminal, 2).contains("WORKTREE"));
+        assert!(row_text(&terminal, 2).starts_with("│󰍝 very-long-branch"));
         assert!(row_text(&terminal, 3).contains("No todos"));
         assert!(row_text(&terminal, 4).contains("BRANCH"));
         assert!(row_text(&terminal, 7).starts_with('└'));
@@ -2490,9 +2502,9 @@ mod tests {
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 3).starts_with("│    [ ] alpha beta"));
-        assert!(row_text(&terminal, 4).starts_with("│        gamma delta"));
-        assert!(row_text(&terminal, 5).starts_with("│    [ ] following"));
+        assert!(row_text(&terminal, 3).starts_with("│    󰄱 alpha beta gamma"));
+        assert!(row_text(&terminal, 4).starts_with("│      delta"));
+        assert!(row_text(&terminal, 5).starts_with("│    󰄱 following"));
     }
 
     #[test]
@@ -2510,18 +2522,18 @@ mod tests {
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 3).starts_with("│    [ ] alpha beta"));
-        assert!(row_text(&terminal, 4).starts_with("│        gamma delta"));
-        assert!(row_text(&terminal, 5).starts_with("│    [ ] following"));
+        assert!(row_text(&terminal, 3).starts_with("│    󰄱 alpha beta gamma"));
+        assert!(row_text(&terminal, 4).starts_with("│      delta"));
+        assert!(row_text(&terminal, 5).starts_with("│    󰄱 following"));
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position::new(20, 4)
+            Position::new(12, 4)
         );
 
         for expected in [
-            Position::new(15, 4),
-            Position::new(9, 4),
-            Position::new(15, 3),
+            Position::new(7, 4),
+            Position::new(18, 3),
+            Position::new(13, 3),
         ] {
             app.handle_key_event(modified_key(KeyCode::Left, KeyModifiers::CONTROL));
             terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -2544,16 +2556,16 @@ mod tests {
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 3).starts_with("│    [ ] ab"));
-        assert!(row_text(&terminal, 4).starts_with("│        "));
-        assert!(row_text(&terminal, 5).starts_with("│        next"));
+        assert!(row_text(&terminal, 3).starts_with("│    󰄱 ab"));
+        assert!(row_text(&terminal, 4).starts_with("│      ef"));
+        assert!(row_text(&terminal, 5).starts_with("│      next"));
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(11, 3)].symbol(), "👩‍🔬");
-        assert_eq!(buffer[(13, 3)].symbol(), "c");
-        assert_eq!(buffer[(14, 3)].symbol(), "d");
-        assert_eq!(buffer[(9, 4)].symbol(), "界");
-        assert_eq!(buffer[(11, 4)].symbol(), "e");
-        assert_eq!(buffer[(12, 4)].symbol(), "f");
+        assert_eq!(buffer[(9, 3)].symbol(), "👩‍🔬");
+        assert_eq!(buffer[(11, 3)].symbol(), "c");
+        assert_eq!(buffer[(12, 3)].symbol(), "d");
+        assert_eq!(buffer[(13, 3)].symbol(), "界");
+        assert_eq!(buffer[(7, 4)].symbol(), "e");
+        assert_eq!(buffer[(8, 4)].symbol(), "f");
     }
 
     #[test]
@@ -2614,9 +2626,9 @@ mod tests {
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 2).starts_with("│    [ ] leading"));
-        assert!(row_text(&terminal, 3).starts_with("│    [ ] one two"));
-        assert!(row_text(&terminal, 4).starts_with("│        three"));
+        assert!(row_text(&terminal, 2).starts_with("│    󰄱 leading"));
+        assert!(row_text(&terminal, 3).starts_with("│    󰄱 one two"));
+        assert!(row_text(&terminal, 4).starts_with("│      three"));
         for row in [3, 4] {
             assert_eq!(
                 terminal.backend().buffer()[(1, row)].bg,
