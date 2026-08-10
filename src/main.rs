@@ -2,7 +2,7 @@ mod repository;
 mod storage;
 mod theme;
 
-use std::{io, time::Duration};
+use std::{io, ops::Range, time::Duration};
 
 use ratatui::{
     DefaultTerminal, Frame,
@@ -739,74 +739,107 @@ const TODO_PREFIX_WIDTH: u16 = 8;
 
 struct DisplayRowLayout<'a> {
     row: DisplayRow<'a>,
-    title_lines: Option<Vec<String>>,
+    title_ranges: Vec<Range<usize>>,
+    editor_cursor: Option<(usize, usize)>,
 }
 
 impl DisplayRowLayout<'_> {
     fn visual_height(&self) -> usize {
-        self.title_lines.as_ref().map_or(1, Vec::len)
+        self.title_ranges.len().max(1)
     }
 }
 
-fn wrap_title(title: &str, width: u16) -> Vec<String> {
+fn wrap_title(title: &str, width: u16) -> Vec<Range<usize>> {
     let width = usize::from(width);
     let mut wrapped = Vec::new();
+    let mut explicit_start = 0;
 
     for explicit_line in title.split('\n') {
+        let explicit_end = explicit_start + explicit_line.len();
         if width == 0 || explicit_line.is_empty() {
-            wrapped.push(String::new());
-            continue;
-        }
-
-        let mut remaining = explicit_line;
-        while !remaining.is_empty() {
-            let mut used_width = 0usize;
-            let mut fitted_end = 0;
-            for (index, grapheme) in remaining.grapheme_indices(true) {
-                let grapheme_width = UnicodeWidthStr::width(grapheme);
-                let next_width = used_width.saturating_add(grapheme_width);
-                if next_width > width {
-                    if fitted_end == 0 {
-                        fitted_end = index + grapheme.len();
+            wrapped.push(explicit_start..explicit_start);
+        } else {
+            let mut remaining_start = explicit_start;
+            while remaining_start < explicit_end {
+                let remaining = &title[remaining_start..explicit_end];
+                let mut used_width = 0usize;
+                let mut fitted_end = 0;
+                for (index, grapheme) in remaining.grapheme_indices(true) {
+                    let grapheme_width = UnicodeWidthStr::width(grapheme);
+                    let next_width = used_width.saturating_add(grapheme_width);
+                    if next_width > width {
+                        if fitted_end == 0 {
+                            fitted_end = index + grapheme.len();
+                        }
+                        break;
                     }
+                    fitted_end = index + grapheme.len();
+                    used_width = next_width;
+                }
+
+                if fitted_end == remaining.len() {
+                    wrapped.push(remaining_start..explicit_end);
                     break;
                 }
-                fitted_end = index + grapheme.len();
-                used_width = next_width;
-            }
 
-            if fitted_end == remaining.len() {
-                wrapped.push(remaining.to_owned());
-                break;
-            }
+                let word_break = remaining
+                    .split_word_bound_indices()
+                    .map(|(index, _)| index)
+                    .take_while(|index| *index <= fitted_end)
+                    .filter(|index| *index > 0)
+                    .last();
+                let line_end = word_break.unwrap_or(fitted_end);
+                let display_end = remaining_start + remaining[..line_end].trim_end().len();
+                wrapped.push(remaining_start..display_end);
 
-            let word_break = remaining
-                .split_word_bound_indices()
-                .map(|(index, _)| index)
-                .take_while(|index| *index <= fitted_end)
-                .filter(|index| *index > 0)
-                .last();
-            let line_end = word_break.unwrap_or(fitted_end);
-            wrapped.push(remaining[..line_end].trim_end().to_owned());
-            remaining = remaining[line_end..].trim_start();
+                let next_start = remaining_start + line_end;
+                let trimmed = title[next_start..explicit_end].trim_start();
+                remaining_start = explicit_end - trimmed.len();
+            }
         }
+
+        explicit_start = explicit_end.saturating_add(1).min(title.len());
     }
 
     if wrapped.is_empty() {
-        wrapped.push(String::new());
+        wrapped.push(0..0);
     }
     wrapped
+}
+
+fn wrapped_cursor(text: &str, lines: &[Range<usize>], cursor: usize) -> (usize, usize) {
+    for (row, line) in lines.iter().enumerate() {
+        let next_start = lines
+            .get(row + 1)
+            .map_or(text.len().saturating_add(1), |next| next.start);
+        if cursor < next_start || row + 1 == lines.len() {
+            let cursor = cursor.clamp(line.start, line.end);
+            return (row, UnicodeWidthStr::width(&text[line.start..cursor]));
+        }
+    }
+    (0, 0)
 }
 
 fn layout_display_rows<'a>(rows: Vec<DisplayRow<'a>>, width: u16) -> Vec<DisplayRowLayout<'a>> {
     let title_width = width.saturating_sub(TODO_PREFIX_WIDTH);
     rows.into_iter()
         .map(|row| {
-            let title_lines = match &row {
-                DisplayRow::Todo(todo) => Some(wrap_title(&todo.title, title_width)),
-                _ => None,
+            let title_ranges = match &row {
+                DisplayRow::Todo(todo) => wrap_title(&todo.title, title_width),
+                DisplayRow::Editor { editor, .. } => wrap_title(&editor.text, title_width),
+                DisplayRow::Header(_) | DisplayRow::Empty => Vec::new(),
             };
-            DisplayRowLayout { row, title_lines }
+            let editor_cursor = match &row {
+                DisplayRow::Editor { editor, .. } => {
+                    Some(wrapped_cursor(&editor.text, &title_ranges, editor.cursor))
+                }
+                DisplayRow::Header(_) | DisplayRow::Todo(_) | DisplayRow::Empty => None,
+            };
+            DisplayRowLayout {
+                row,
+                title_ranges,
+                editor_cursor,
+            }
         })
         .collect()
 }
@@ -951,18 +984,24 @@ fn render_branch_sections(
                         row_area.height,
                     );
                     let title_lines = layout
-                        .title_lines
-                        .as_ref()
-                        .expect("todo rows always have wrapped title lines")
+                        .title_ranges
                         .iter()
-                        .map(|line| Line::from(line.as_str()))
+                        .map(|range| Line::from(&todo.title[range.clone()]))
                         .collect::<Vec<_>>();
                     frame.render_widget(Paragraph::new(title_lines).style(style), title_area);
                 }
             }
-            DisplayRow::Editor { editor, completed } => {
-                render_editor(frame, row_area, editor, *completed, theme);
-            }
+            DisplayRow::Editor { editor, completed } => render_editor(
+                frame,
+                row_area,
+                editor,
+                *completed,
+                &layout.title_ranges,
+                layout
+                    .editor_cursor
+                    .expect("editor rows always have a cursor"),
+                theme,
+            ),
             DisplayRow::Empty => {
                 frame.render_widget(
                     Paragraph::new("    No todos").style(
@@ -1034,45 +1073,66 @@ fn render_branch_header(
     }
 }
 
-fn render_editor(frame: &mut Frame, area: Rect, editor: &Editor, completed: bool, theme: &Theme) {
+fn render_editor(
+    frame: &mut Frame,
+    area: Rect,
+    editor: &Editor,
+    completed: bool,
+    title_ranges: &[Range<usize>],
+    cursor: (usize, usize),
+    theme: &Theme,
+) {
     let marker = if completed { "[x]" } else { "[ ]" };
-    let prefix = format!("    {marker} ");
     let background = theme.selection_background;
     let foreground = if completed {
         theme.foreground_muted
     } else {
         theme.foreground
     };
-    frame.render_widget(
-        Block::default().style(Style::default().bg(background)),
-        area,
+    let style = Style::default().fg(foreground).bg(background);
+    frame.render_widget(Block::default().style(style), area);
+
+    let first_line = cursor
+        .0
+        .saturating_add(1)
+        .saturating_sub(usize::from(area.height));
+    let marker_area = Rect::new(
+        area.x,
+        area.y,
+        area.width.min(TODO_PREFIX_WIDTH),
+        area.height.min(1),
     );
-    let available = usize::from(area.width).saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
-    let before_cursor = &editor.text[..editor.cursor];
-    let mut start = 0;
-    let mut width = UnicodeWidthStr::width(before_cursor);
-    while width >= available.max(1) && start < editor.cursor {
-        let grapheme = before_cursor[start..]
-            .graphemes(true)
-            .next()
-            .expect("valid grapheme boundary");
-        start += grapheme.len();
-        width = UnicodeWidthStr::width(&before_cursor[start..]);
-    }
-    let visible = &editor.text[start..];
     frame.render_widget(
-        Paragraph::new(format!("{prefix}{visible}"))
-            .style(Style::default().fg(foreground).bg(background)),
-        area,
+        Paragraph::new(format!("    {marker} ")).style(style),
+        marker_area,
     );
-    if available > 0 {
-        let cursor_x = area
-            .x
-            .saturating_add(UnicodeWidthStr::width(prefix.as_str()) as u16)
-            .saturating_add(width as u16)
-            .min(area.right().saturating_sub(1));
-        frame.set_cursor_position(Position::new(cursor_x, area.y));
+
+    if area.width <= TODO_PREFIX_WIDTH {
+        return;
     }
+    let title_area = Rect::new(
+        area.x.saturating_add(TODO_PREFIX_WIDTH),
+        area.y,
+        area.width - TODO_PREFIX_WIDTH,
+        area.height,
+    );
+    let title_lines = title_ranges
+        .iter()
+        .skip(first_line)
+        .take(usize::from(area.height))
+        .map(|range| Line::from(&editor.text[range.clone()]))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(title_lines).style(style), title_area);
+
+    let cursor_y = area
+        .y
+        .saturating_add(cursor.0.saturating_sub(first_line) as u16)
+        .min(area.bottom().saturating_sub(1));
+    let cursor_x = title_area
+        .x
+        .saturating_add(cursor.1 as u16)
+        .min(title_area.right().saturating_sub(1));
+    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
 
 #[cfg(test)]
@@ -1664,7 +1724,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_scrolling_does_not_split_emoji_graphemes() {
+    fn exact_width_editor_keeps_a_full_grapheme_visible() {
         let mut app = app_with_sections(vec![section("main")]);
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "👩‍🔬");
@@ -1673,9 +1733,11 @@ mod tests {
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        let cursor = terminal.backend_mut().get_cursor_position().unwrap();
-        assert_eq!(cursor, Position::new(9, 2));
-        assert_eq!(row_text(&terminal, 2), "│    [ ]   │");
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            Position::new(10, 2)
+        );
+        assert_eq!(terminal.backend().buffer()[(9, 2)].symbol(), "👩‍🔬");
     }
 
     #[test]
@@ -1929,6 +1991,43 @@ mod tests {
         assert!(row_text(&terminal, 3).starts_with("│    [ ] alpha beta"));
         assert!(row_text(&terminal, 4).starts_with("│        gamma delta"));
         assert!(row_text(&terminal, 5).starts_with("│    [ ] following"));
+    }
+
+    #[test]
+    fn editor_wraps_as_text_is_typed_and_shifts_following_rows() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.store
+            .insert_todo("refs/heads/main", "following", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.handle_key_event(key(KeyCode::Char('o')));
+        type_text(&mut app, "alpha beta gamma delta");
+        let backend = TestBackend::new(24, 9);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert!(row_text(&terminal, 3).starts_with("│    [ ] alpha beta"));
+        assert!(row_text(&terminal, 4).starts_with("│        gamma delta"));
+        assert!(row_text(&terminal, 5).starts_with("│    [ ] following"));
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            Position::new(20, 4)
+        );
+
+        for expected in [
+            Position::new(15, 4),
+            Position::new(9, 4),
+            Position::new(15, 3),
+        ] {
+            app.handle_key_event(modified_key(KeyCode::Left, KeyModifiers::CONTROL));
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            assert_eq!(
+                terminal.backend_mut().get_cursor_position().unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
