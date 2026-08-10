@@ -9,7 +9,7 @@ use ratatui::{
     crossterm::{
         event::{
             self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-            MouseButton, MouseEvent, MouseEventKind,
+            KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
         },
         execute,
     },
@@ -541,6 +541,20 @@ impl App {
                 let next = next_boundary(&editor.text, editor.cursor);
                 editor.text.drain(editor.cursor..next);
             }
+            KeyCode::Left
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+            {
+                editor.cursor = previous_word_boundary(&editor.text, editor.cursor);
+            }
+            KeyCode::Right
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+            {
+                editor.cursor = next_word_boundary(&editor.text, editor.cursor);
+            }
             KeyCode::Left => {
                 editor.cursor = previous_boundary(&editor.text, editor.cursor);
             }
@@ -566,6 +580,24 @@ fn next_boundary(text: &str, cursor: usize) -> usize {
     text.grapheme_indices(true)
         .map(|(index, _)| index)
         .find(|index| *index > cursor)
+        .unwrap_or(text.len())
+}
+
+fn previous_word_boundary(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .split_word_bound_indices()
+        .filter(|(_, segment)| !segment.chars().all(char::is_whitespace))
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or(0)
+}
+
+fn next_word_boundary(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .split_word_bound_indices()
+        .skip(1)
+        .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+        .map(|(index, _)| cursor + index)
         .unwrap_or(text.len())
 }
 
@@ -1107,6 +1139,10 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
     fn type_text(app: &mut App, text: &str) {
         for character in text.chars() {
             app.handle_key_event(key(KeyCode::Char(character)));
@@ -1523,6 +1559,31 @@ mod tests {
         app.handle_key_event(key(KeyCode::End));
         assert_eq!(editor(&app).text, "好é");
         assert_eq!(editor(&app).cursor, "好é".len());
+    }
+
+    #[test]
+    fn modified_arrows_move_between_unicode_word_boundaries() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.handle_key_event(key(KeyCode::Char('o')));
+        type_text(&mut app, "alpha βeta gamma");
+
+        app.handle_key_event(modified_key(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(editor(&app).cursor, "alpha βeta ".len());
+        app.handle_key_event(modified_key(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(editor(&app).cursor, "alpha ".len());
+        app.handle_key_event(modified_key(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(editor(&app).cursor, 0);
+        app.handle_key_event(modified_key(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(editor(&app).cursor, 0);
+
+        app.handle_key_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(editor(&app).cursor, "alpha ".len());
+        app.handle_key_event(modified_key(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(editor(&app).cursor, "alpha βeta ".len());
+        app.handle_key_event(modified_key(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(editor(&app).cursor, "alpha βeta gamma".len());
+        app.handle_key_event(modified_key(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(editor(&app).cursor, "alpha βeta gamma".len());
     }
 
     #[test]
