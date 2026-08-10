@@ -211,14 +211,32 @@ impl App {
         if !area.contains(position) {
             return None;
         }
-        let rows = display_rows(&self.repository.sections, &self.todos, self.draft.as_ref());
+        let rows = layout_display_rows(
+            display_rows(&self.repository.sections, &self.todos, self.draft.as_ref()),
+            area.width,
+        );
         let first = viewport_start(&rows, area.height, self.focus.as_ref(), self.draft.as_ref());
-        let row = rows.get(first + usize::from(position.y - area.y))?;
-        match row {
-            DisplayRow::Header(section) => Some(Focus::Branch(section.full_ref_name.clone())),
-            DisplayRow::Todo(todo) => Some(Focus::Todo(todo.id)),
-            DisplayRow::Draft(_) | DisplayRow::Empty => None,
+        let target_y = usize::from(position.y - area.y);
+        let mut rendered_y = 0;
+        for layout in rows.iter().skip(first) {
+            if rendered_y >= usize::from(area.height) {
+                break;
+            }
+            let rendered_height = layout
+                .visual_height()
+                .min(usize::from(area.height) - rendered_y);
+            if target_y < rendered_y + rendered_height {
+                return match &layout.row {
+                    DisplayRow::Header(section) => {
+                        Some(Focus::Branch(section.full_ref_name.clone()))
+                    }
+                    DisplayRow::Todo(todo) => Some(Focus::Todo(todo.id)),
+                    DisplayRow::Draft(_) | DisplayRow::Empty => None,
+                };
+            }
+            rendered_y += rendered_height;
         }
+        None
     }
 
     fn refresh_external(&mut self) {
@@ -426,8 +444,8 @@ impl App {
         }
         match self.input_mode {
             InputMode::Normal => match key.code {
-                KeyCode::Char('j') => self.move_focus(1),
-                KeyCode::Char('k') => self.move_focus(-1),
+                KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
+                KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
                 KeyCode::Char('o') => self.open_draft(),
                 KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
                 KeyCode::Char('q') => self.exit = true,
@@ -615,29 +633,125 @@ fn display_rows<'a>(
     }
     rows
 }
+
+const TODO_PREFIX_WIDTH: u16 = 8;
+
+struct DisplayRowLayout<'a> {
+    row: DisplayRow<'a>,
+    title_lines: Option<Vec<String>>,
+}
+
+impl DisplayRowLayout<'_> {
+    fn visual_height(&self) -> usize {
+        self.title_lines.as_ref().map_or(1, Vec::len)
+    }
+}
+
+fn wrap_title(title: &str, width: u16) -> Vec<String> {
+    let width = usize::from(width);
+    let mut wrapped = Vec::new();
+
+    for explicit_line in title.split('\n') {
+        if width == 0 || explicit_line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+
+        let mut remaining = explicit_line;
+        while !remaining.is_empty() {
+            let mut used_width = 0usize;
+            let mut fitted_end = 0;
+            for (index, grapheme) in remaining.grapheme_indices(true) {
+                let grapheme_width = UnicodeWidthStr::width(grapheme);
+                let next_width = used_width.saturating_add(grapheme_width);
+                if next_width > width {
+                    if fitted_end == 0 {
+                        fitted_end = index + grapheme.len();
+                    }
+                    break;
+                }
+                fitted_end = index + grapheme.len();
+                used_width = next_width;
+            }
+
+            if fitted_end == remaining.len() {
+                wrapped.push(remaining.to_owned());
+                break;
+            }
+
+            let word_break = remaining
+                .split_word_bound_indices()
+                .map(|(index, _)| index)
+                .take_while(|index| *index <= fitted_end)
+                .filter(|index| *index > 0)
+                .last();
+            let line_end = word_break.unwrap_or(fitted_end);
+            wrapped.push(remaining[..line_end].trim_end().to_owned());
+            remaining = remaining[line_end..].trim_start();
+        }
+    }
+
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped
+}
+
+fn layout_display_rows<'a>(rows: Vec<DisplayRow<'a>>, width: u16) -> Vec<DisplayRowLayout<'a>> {
+    let title_width = width.saturating_sub(TODO_PREFIX_WIDTH);
+    rows.into_iter()
+        .map(|row| {
+            let title_lines = match &row {
+                DisplayRow::Todo(todo) => Some(wrap_title(&todo.title, title_width)),
+                _ => None,
+            };
+            DisplayRowLayout { row, title_lines }
+        })
+        .collect()
+}
+
+fn row_has_focus(
+    layout: &DisplayRowLayout<'_>,
+    focus: Option<&Focus>,
+    draft: Option<&Draft>,
+) -> bool {
+    match &layout.row {
+        DisplayRow::Header(section) => {
+            draft.is_none()
+                && matches!(focus, Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name)
+        }
+        DisplayRow::Todo(todo) => {
+            draft.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id)
+        }
+        DisplayRow::Draft(_) => true,
+        DisplayRow::Empty => false,
+    }
+}
 fn viewport_start(
-    rows: &[DisplayRow<'_>],
+    rows: &[DisplayRowLayout<'_>],
     height: u16,
     focus: Option<&Focus>,
     draft: Option<&Draft>,
 ) -> usize {
-    rows.iter()
-        .position(|row| match row {
-            DisplayRow::Header(section) => {
-                draft.is_none()
-                    && matches!(focus, Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name)
-            }
-            DisplayRow::Todo(todo) => {
-                draft.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id)
-            }
-            DisplayRow::Draft(_) => true,
-            DisplayRow::Empty => false,
-        })
-        .map(|row| {
-            row.saturating_add(1)
-                .saturating_sub(usize::from(height))
-        })
-        .unwrap_or(0)
+    let Some(focused) = rows
+        .iter()
+        .position(|layout| row_has_focus(layout, focus, draft))
+    else {
+        return 0;
+    };
+
+    let height = usize::from(height);
+    let mut start = focused;
+    let mut occupied = rows[focused].visual_height();
+    while start > 0 {
+        let preceding_height = rows[start - 1].visual_height();
+        if occupied.saturating_add(preceding_height) > height {
+            break;
+        }
+        start -= 1;
+        occupied = occupied.saturating_add(preceding_height);
+    }
+    start
 }
 
 fn render_branch_sections(
@@ -669,17 +783,25 @@ fn render_branch_sections(
         return;
     }
 
-    let rows = display_rows(sections, todos, draft);
+    let rows = layout_display_rows(display_rows(sections, todos, draft), area.width);
     let first = viewport_start(&rows, area.height, focus, draft);
+    let mut rendered_y = 0usize;
 
-    for (visible, row) in rows
-        .iter()
-        .skip(first)
-        .take(usize::from(area.height))
-        .enumerate()
-    {
-        let row_area = Rect::new(area.x, area.y + visible as u16, area.width, 1);
-        match row {
+    for layout in rows.iter().skip(first) {
+        if rendered_y >= usize::from(area.height) {
+            break;
+        }
+        let rendered_height = layout
+            .visual_height()
+            .min(usize::from(area.height) - rendered_y);
+        let row_area = Rect::new(
+            area.x,
+            area.y + rendered_y as u16,
+            area.width,
+            rendered_height as u16,
+        );
+
+        match &layout.row {
             DisplayRow::Header(section) => {
                 let selected = draft.is_none()
                     && matches!(focus, Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name);
@@ -706,11 +828,36 @@ fn render_branch_sections(
                 } else {
                     theme.foreground
                 };
-                frame.render_widget(
-                    Paragraph::new(format!("    {marker} {}", todo.title))
-                        .style(Style::default().fg(foreground).bg(background)),
-                    row_area,
+                let style = Style::default().fg(foreground).bg(background);
+                frame.render_widget(Block::default().style(style), row_area);
+
+                let marker_area = Rect::new(
+                    row_area.x,
+                    row_area.y,
+                    row_area.width.min(TODO_PREFIX_WIDTH),
+                    1,
                 );
+                frame.render_widget(
+                    Paragraph::new(format!("    {marker} ")).style(style),
+                    marker_area,
+                );
+
+                if row_area.width > TODO_PREFIX_WIDTH {
+                    let title_area = Rect::new(
+                        row_area.x.saturating_add(TODO_PREFIX_WIDTH),
+                        row_area.y,
+                        row_area.width - TODO_PREFIX_WIDTH,
+                        row_area.height,
+                    );
+                    let title_lines = layout
+                        .title_lines
+                        .as_ref()
+                        .expect("todo rows always have wrapped title lines")
+                        .iter()
+                        .map(|line| Line::from(line.as_str()))
+                        .collect::<Vec<_>>();
+                    frame.render_widget(Paragraph::new(title_lines).style(style), title_area);
+                }
             }
             DisplayRow::Draft(draft) => render_draft(frame, row_area, draft, theme),
             DisplayRow::Empty => {
@@ -724,6 +871,7 @@ fn render_branch_sections(
                 );
             }
         }
+        rendered_y += rendered_height;
     }
 }
 
@@ -1182,6 +1330,26 @@ mod tests {
     }
 
     #[test]
+    fn arrow_navigation_visits_headers_and_todos() {
+        let mut app = app_with_sections(vec![section("main"), section("topic")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "one", None)
+            .unwrap();
+        app.reload();
+
+        app.handle_key_event(key(KeyCode::Down));
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+        app.handle_key_event(key(KeyCode::Down));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/topic".to_owned()))
+        );
+        app.handle_key_event(key(KeyCode::Up));
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+    }
+
+    #[test]
     fn focused_todo_and_unicode_cursor_remain_visible() {
         let mut app = app_with_sections(vec![section("main"), section("topic")]);
         let todo = app
@@ -1445,6 +1613,138 @@ mod tests {
             terminal.backend().buffer()[(1, 2)].bg,
             theme.selection_background
         );
+    }
+
+    #[test]
+    fn long_titles_wrap_at_words_and_shift_following_rows() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "alpha beta gamma delta", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "following", Some(first.id))
+            .unwrap();
+        app.reload();
+        let backend = TestBackend::new(24, 9);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert!(row_text(&terminal, 3).starts_with("│    [ ] alpha beta"));
+        assert!(row_text(&terminal, 4).starts_with("│        gamma delta"));
+        assert!(row_text(&terminal, 5).starts_with("│    [ ] following"));
+    }
+
+    #[test]
+    fn unicode_overlong_words_wrap_without_splitting_graphemes() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.store
+            .insert_todo("refs/heads/main", "ab👩‍🔬cd界ef\nnext", None)
+            .unwrap();
+        app.reload();
+        let backend = TestBackend::new(16, 9);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert!(row_text(&terminal, 3).starts_with("│    [ ] ab"));
+        assert!(row_text(&terminal, 4).starts_with("│        "));
+        assert!(row_text(&terminal, 5).starts_with("│        next"));
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(11, 3)].symbol(), "👩‍🔬");
+        assert_eq!(buffer[(13, 3)].symbol(), "c");
+        assert_eq!(buffer[(14, 3)].symbol(), "d");
+        assert_eq!(buffer[(9, 4)].symbol(), "界");
+        assert_eq!(buffer[(11, 4)].symbol(), "e");
+        assert_eq!(buffer[(12, 4)].symbol(), "f");
+    }
+
+    #[test]
+    fn selection_and_hover_cover_every_wrapped_line_and_continuations_hit_test() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "alpha beta gamma delta", None)
+            .unwrap();
+        app.reload();
+        let theme = app.theme;
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        app.focus = Some(Focus::Todo(todo.id));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        for row in [3, 4] {
+            for column in 1..23 {
+                assert_eq!(
+                    terminal.backend().buffer()[(column, row)].bg,
+                    theme.selection_background
+                );
+            }
+        }
+
+        app.focus = None;
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 10, 4));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        for row in [3, 4] {
+            for column in 1..23 {
+                assert_eq!(
+                    terminal.backend().buffer()[(column, row)].bg,
+                    theme.hover_background
+                );
+            }
+        }
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 10, 4));
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+    }
+
+    #[test]
+    fn scrolling_keeps_a_wrapped_focus_visible_and_preserves_hit_testing() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let leading = app
+            .store
+            .insert_todo("refs/heads/main", "leading", None)
+            .unwrap();
+        let wrapped = app
+            .store
+            .insert_todo("refs/heads/main", "one two three", Some(leading.id))
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(wrapped.id));
+        let theme = app.theme;
+        let backend = TestBackend::new(18, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert!(row_text(&terminal, 2).starts_with("│    [ ] leading"));
+        assert!(row_text(&terminal, 3).starts_with("│    [ ] one two"));
+        assert!(row_text(&terminal, 4).starts_with("│        three"));
+        for row in [3, 4] {
+            assert_eq!(
+                terminal.backend().buffer()[(1, row)].bg,
+                theme.selection_background
+            );
+        }
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        assert_eq!(app.focus, Some(Focus::Todo(leading.id)));
+    }
+
+    #[test]
+    fn very_narrow_terminals_render_wrapped_todos_without_panicking() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.store
+            .insert_todo("refs/heads/main", "👩‍🔬overlong", None)
+            .unwrap();
+        app.reload();
+
+        for width in 1..=9 {
+            let backend = TestBackend::new(width, 5);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+        }
     }
 }
 
