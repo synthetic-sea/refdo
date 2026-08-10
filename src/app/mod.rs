@@ -5,7 +5,10 @@ mod navigation;
 mod text_input;
 mod ui;
 
-use std::io;
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 use ratatui::{
     DefaultTerminal, Frame,
@@ -18,10 +21,12 @@ use ratatui::{
     widgets::{Block, Padding},
 };
 
+use crate::config::ThemeMode;
 use crate::repository::RepositoryContext;
 use crate::storage::{Todo, TodoId, TodoStore};
 use crate::theme::{TOKYO_NIGHT_DAY, Theme};
 
+const SYSTEM_THEME_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const UNKNOWN_DATA_VERSION: i64 = -1;
 
 #[derive(Clone, Debug)]
@@ -87,6 +92,12 @@ struct ClearConfirmation {
     target_branch: String,
 }
 
+struct SystemThemeState {
+    light_theme: Theme,
+    dark_theme: Theme,
+    last_checked: Instant,
+}
+
 struct App {
     exit: bool,
     repository: RepositoryContext,
@@ -98,6 +109,7 @@ struct App {
     cut_buffer: Option<Todo>,
     pending_cut: bool,
     theme: Theme,
+    system_theme: Option<SystemThemeState>,
     data_version: i64,
     error: Option<String>,
     pointer_position: Option<Position>,
@@ -161,6 +173,7 @@ impl App {
             cut_buffer: None,
             pending_cut: false,
             theme,
+            system_theme: None,
             data_version,
             error,
             pointer_position: None,
@@ -168,6 +181,57 @@ impl App {
             viewport_start: 0,
             reveal_focus: true,
         }
+    }
+
+    fn new_system(light_theme: Theme, dark_theme: Theme) -> Self {
+        Self::new_system_with_detector(light_theme, dark_theme, Instant::now(), || {
+            dark_light::detect().ok()
+        })
+    }
+
+    fn new_system_with_detector(
+        light_theme: Theme,
+        dark_theme: Theme,
+        now: Instant,
+        detect: impl FnOnce() -> Option<dark_light::Mode>,
+    ) -> Self {
+        let theme = match detect() {
+            Some(dark_light::Mode::Dark) => dark_theme,
+            Some(dark_light::Mode::Light | dark_light::Mode::Unspecified) | None => light_theme,
+        };
+        let mut app = Self::new(theme);
+        app.system_theme = Some(SystemThemeState {
+            light_theme,
+            dark_theme,
+            last_checked: now,
+        });
+        app
+    }
+
+    fn refresh_system_theme(&mut self) {
+        self.refresh_system_theme_with(Instant::now(), || dark_light::detect().ok());
+    }
+
+    fn refresh_system_theme_with(
+        &mut self,
+        now: Instant,
+        detect: impl FnOnce() -> Option<dark_light::Mode>,
+    ) {
+        let Some(system_theme) = &mut self.system_theme else {
+            return;
+        };
+        if now
+            .checked_duration_since(system_theme.last_checked)
+            .is_none_or(|elapsed| elapsed < SYSTEM_THEME_REFRESH_INTERVAL)
+        {
+            return;
+        }
+        system_theme.last_checked = now;
+        self.theme = match detect() {
+            Some(dark_light::Mode::Light) => system_theme.light_theme,
+            Some(dark_light::Mode::Dark) => system_theme.dark_theme,
+            Some(dark_light::Mode::Unspecified) | None => self.theme,
+        };
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -301,6 +365,13 @@ impl App {
 #[cfg(test)]
 mod tests;
 
-pub(crate) fn run(theme: Theme) -> std::io::Result<()> {
-    ratatui::run(|terminal| App::new(theme).run(terminal))
+pub(crate) fn run(light_theme: Theme, dark_theme: Theme, mode: ThemeMode) -> std::io::Result<()> {
+    ratatui::run(|terminal| {
+        let mut app = match mode {
+            ThemeMode::Light => App::new(light_theme),
+            ThemeMode::Dark => App::new(dark_theme),
+            ThemeMode::System => App::new_system(light_theme, dark_theme),
+        };
+        app.run(terminal)
+    })
 }

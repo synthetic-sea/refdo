@@ -3,6 +3,7 @@ mod commands;
 mod navigation;
 mod refresh;
 mod support;
+mod theme;
 mod ui;
 
 use super::{

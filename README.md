@@ -105,7 +105,7 @@ dark = "tokyo-night"
 mode = "system"
 ```
 
-`light` and `dark` select the built-in themes used for each appearance. `mode` accepts `light`, `dark`, or `system`; `system` follows the operating system preference and falls back to the light theme when no preference can be detected.
+`light` and `dark` select the built-in themes used for each appearance. Setting `mode` to `light` or `dark` keeps that appearance fixed; `system` follows operating-system appearance changes while refdo is running and falls back to light on startup only when the appearance cannot be detected.
 
 ## Storage
 

@@ -20,6 +20,7 @@ impl App {
             }
         }
         self.refresh_external();
+        self.refresh_system_theme();
         Ok(())
     }
 
