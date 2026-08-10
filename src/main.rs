@@ -605,6 +605,7 @@ impl App {
             KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
             KeyCode::Char('p') => self.paste_cut_todo(true),
             KeyCode::Char('P') => self.paste_cut_todo(false),
+            KeyCode::Esc => self.focus = None,
             KeyCode::Char('q') => self.exit = true,
             _ => {}
         }
@@ -1346,6 +1347,29 @@ mod tests {
             .filter(|todo| todo.branch_ref == branch_ref)
             .map(|todo| (todo.title.clone(), todo.completed))
             .collect()
+    }
+
+    #[test]
+    fn escape_clears_normal_mode_row_selection() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "selected", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(todo.id));
+
+        app.handle_key_event(key(KeyCode::Char('d')));
+        assert!(app.pending_cut);
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert_eq!(app.focus, None);
+        assert!(!app.pending_cut);
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.handle_key_event(key(KeyCode::Esc));
+        assert_eq!(app.focus, None);
     }
 
     #[test]
