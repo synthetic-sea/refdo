@@ -200,6 +200,38 @@ impl TodoStore {
         })
     }
 
+    pub fn update_todo_title(&mut self, id: TodoId, title: &str) -> Result<Todo, StoreError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(StoreError::EmptyTitle);
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let todo = transaction
+            .query_row(
+                "UPDATE todos
+                 SET title = ?1
+                 WHERE id = ?2
+                 RETURNING id, branch_ref, title, completed, sort_order",
+                params![title, id],
+                |row| {
+                    Ok(Todo {
+                        id: row.get(0)?,
+                        branch_ref: row.get(1)?,
+                        title: row.get(2)?,
+                        completed: row.get(3)?,
+                        sort_order: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::TodoNotFound(id))?;
+        transaction.commit()?;
+        Ok(todo)
+    }
+
     pub fn toggle_todo(&mut self, id: TodoId) -> Result<Todo, StoreError> {
         let transaction = self
             .connection
@@ -393,6 +425,56 @@ mod tests {
         let incomplete = store.toggle_todo(inserted.id).unwrap();
         assert_eq!(incomplete, inserted);
         assert_eq!(store.load_all().unwrap(), vec![incomplete]);
+    }
+
+    #[test]
+    fn updates_a_trimmed_title_without_changing_other_fields() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let first = store
+            .insert_todo("refs/heads/feature", "first", None)
+            .unwrap();
+        let target = store
+            .insert_todo("refs/heads/feature", "old title", Some(first.id))
+            .unwrap();
+        let completed = store.toggle_todo(target.id).unwrap();
+
+        let updated = store
+            .update_todo_title(completed.id, "  new title \t")
+            .unwrap();
+
+        assert_eq!(
+            updated,
+            super::Todo {
+                title: "new title".to_owned(),
+                ..completed
+            }
+        );
+        assert_eq!(store.load_all().unwrap(), vec![first, updated]);
+    }
+
+    #[test]
+    fn rejects_an_empty_updated_title_without_changing_the_todo() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let inserted = store
+            .insert_todo("refs/heads/main", "keep this", None)
+            .unwrap();
+
+        assert!(matches!(
+            store.update_todo_title(inserted.id, " \t\n "),
+            Err(StoreError::EmptyTitle)
+        ));
+        assert_eq!(store.load_all().unwrap(), vec![inserted]);
+    }
+
+    #[test]
+    fn updating_a_missing_todo_returns_not_found() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+
+        assert!(matches!(
+            store.update_todo_title(42, "new title"),
+            Err(StoreError::TodoNotFound(42))
+        ));
+        assert!(store.load_all().unwrap().is_empty());
     }
 
     #[test]

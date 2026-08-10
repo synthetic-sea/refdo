@@ -27,18 +27,24 @@ use theme::{TOKYO_NIGHT_DAY, Theme};
 
 const UNKNOWN_DATA_VERSION: i64 = -1;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum InputMode {
-    #[default]
+#[derive(Clone, Debug)]
+enum Mode {
     Normal,
-    Insert,
+    Insert(Editor),
 }
 
-impl InputMode {
-    const fn label(self) -> &'static str {
+impl Mode {
+    const fn label(&self) -> &'static str {
         match self {
             Self::Normal => " NORMAL ",
-            Self::Insert => " INSERT ",
+            Self::Insert(_) => " INSERT ",
+        }
+    }
+
+    const fn editor(&self) -> Option<&Editor> {
+        match self {
+            Self::Normal => None,
+            Self::Insert(editor) => Some(editor),
         }
     }
 }
@@ -50,12 +56,22 @@ enum Focus {
 }
 
 #[derive(Clone, Debug)]
-struct Draft {
-    branch_ref: String,
-    after: Option<TodoId>,
+enum EditorTarget {
+    Create {
+        branch_ref: String,
+        after: Option<TodoId>,
+        origin: Focus,
+    },
+    Update {
+        id: TodoId,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct Editor {
+    target: EditorTarget,
     text: String,
     cursor: usize,
-    origin: Focus,
 }
 
 struct App {
@@ -65,9 +81,8 @@ struct App {
     persistence_available: bool,
     todos: Vec<Todo>,
     focus: Option<Focus>,
-    draft: Option<Draft>,
+    mode: Mode,
     theme: Theme,
-    input_mode: InputMode,
     data_version: i64,
     error: Option<String>,
     pointer_position: Option<Position>,
@@ -125,9 +140,8 @@ impl App {
             persistence_available,
             todos,
             focus: None,
-            draft: None,
+            mode: Mode::Normal,
             theme,
-            input_mode: InputMode::Normal,
             data_version,
             error,
             pointer_position: None,
@@ -172,13 +186,13 @@ impl App {
             &self.todos,
             self.focus.as_ref(),
             hovered.as_ref(),
-            self.draft.as_ref(),
+            self.mode.editor(),
             &self.theme,
         );
         render_footer(
             frame,
             footer_area,
-            self.input_mode,
+            &self.mode,
             self.error.as_deref(),
             &self.theme,
         );
@@ -199,7 +213,7 @@ impl App {
     fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
         let position = Position::new(mouse_event.column, mouse_event.row);
         self.pointer_position = Some(position);
-        if self.input_mode == InputMode::Normal
+        if matches!(&self.mode, Mode::Normal)
             && mouse_event.kind == MouseEventKind::Down(MouseButton::Left)
         {
             self.focus = self.focus_at(position);
@@ -211,11 +225,12 @@ impl App {
         if !area.contains(position) {
             return None;
         }
+        let editor = self.mode.editor();
         let rows = layout_display_rows(
-            display_rows(&self.repository.sections, &self.todos, self.draft.as_ref()),
+            display_rows(&self.repository.sections, &self.todos, editor),
             area.width,
         );
-        let first = viewport_start(&rows, area.height, self.focus.as_ref(), self.draft.as_ref());
+        let first = viewport_start(&rows, area.height, self.focus.as_ref(), editor);
         let target_y = usize::from(position.y - area.y);
         let mut rendered_y = 0;
         for layout in rows.iter().skip(first) {
@@ -231,7 +246,7 @@ impl App {
                         Some(Focus::Branch(section.full_ref_name.clone()))
                     }
                     DisplayRow::Todo(todo) => Some(Focus::Todo(todo.id)),
-                    DisplayRow::Draft(_) | DisplayRow::Empty => None,
+                    DisplayRow::Editor { .. } | DisplayRow::Empty => None,
                 };
             }
             rendered_y += rendered_height;
@@ -349,7 +364,7 @@ impl App {
         self.focus = Some(rows[next].clone());
     }
 
-    fn open_draft(&mut self) {
+    fn open_create_editor(&mut self) {
         if !self.persistence_available {
             return;
         }
@@ -366,55 +381,98 @@ impl App {
                 (todo.branch_ref.clone(), Some(*id))
             }
         };
-        self.draft = Some(Draft {
-            branch_ref,
-            after,
+        self.mode = Mode::Insert(Editor {
+            target: EditorTarget::Create {
+                branch_ref,
+                after,
+                origin,
+            },
             text: String::new(),
             cursor: 0,
-            origin,
         });
-        self.input_mode = InputMode::Insert;
         self.error = None;
     }
 
-    fn discard_draft(&mut self) {
-        if let Some(draft) = self.draft.take() {
-            self.focus = Some(draft.origin);
+    fn open_update_editor(&mut self) {
+        if !self.persistence_available {
+            return;
         }
-        self.input_mode = InputMode::Normal;
-        self.error = None;
-    }
 
-    fn commit_draft(&mut self) {
-        let Some(draft) = self.draft.as_ref() else {
+        let Some(Focus::Todo(id)) = self.focus.as_ref() else {
             return;
         };
-        if draft.text.trim().is_empty() {
-            self.discard_draft();
+        let Some(todo) = self.todos.iter().find(|todo| todo.id == *id) else {
             return;
+        };
+        self.mode = Mode::Insert(Editor {
+            target: EditorTarget::Update { id: *id },
+            text: todo.title.clone(),
+            cursor: todo.title.len(),
+        });
+        self.error = None;
+    }
+
+    fn discard_editor(&mut self) {
+        if let Mode::Insert(Editor {
+            target: EditorTarget::Create { origin, .. },
+            ..
+        }) = &self.mode
+        {
+            self.focus = Some(origin.clone());
         }
-        let result = self
-            .store
-            .insert_todo(&draft.branch_ref, &draft.text, draft.after);
-        match result {
-            Ok(todo) => {
-                let committed = Focus::Todo(todo.id);
-                let branch_ref = todo.branch_ref.clone();
-                let todo_id = todo.id;
-                self.integrate_todo(todo);
-                self.focus = Some(committed.clone());
-                self.draft = Some(Draft {
-                    branch_ref,
-                    after: Some(todo_id),
-                    text: String::new(),
-                    cursor: 0,
-                    origin: committed,
-                });
-                if self.reload() {
-                    self.error = None;
+        self.mode = Mode::Normal;
+        self.error = None;
+    }
+
+    fn commit_editor(&mut self) {
+        let Mode::Insert(editor) = &self.mode else {
+            return;
+        };
+        let target = editor.target.clone();
+        let text = editor.text.clone();
+
+        match target {
+            EditorTarget::Create {
+                branch_ref, after, ..
+            } => {
+                if text.trim().is_empty() {
+                    self.discard_editor();
+                    return;
+                }
+                match self.store.insert_todo(&branch_ref, &text, after) {
+                    Ok(todo) => {
+                        let committed = Focus::Todo(todo.id);
+                        let branch_ref = todo.branch_ref.clone();
+                        let todo_id = todo.id;
+                        self.integrate_todo(todo);
+                        self.focus = Some(committed.clone());
+                        self.mode = Mode::Insert(Editor {
+                            target: EditorTarget::Create {
+                                branch_ref,
+                                after: Some(todo_id),
+                                origin: committed,
+                            },
+                            text: String::new(),
+                            cursor: 0,
+                        });
+                        if self.reload() {
+                            self.error = None;
+                        }
+                    }
+                    Err(error) => self.error = Some(error.to_string()),
                 }
             }
-            Err(error) => self.error = Some(error.to_string()),
+            EditorTarget::Update { id } => match self.store.update_todo_title(id, &text) {
+                Ok(todo) => {
+                    if let Some(existing) = self.todos.iter_mut().find(|todo| todo.id == id) {
+                        *existing = todo;
+                    }
+                    self.focus = Some(Focus::Todo(id));
+                    self.mode = Mode::Normal;
+                    self.error = None;
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            },
         }
     }
 
@@ -442,64 +500,56 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        match self.input_mode {
-            InputMode::Normal => match key.code {
+        if matches!(&self.mode, Mode::Normal) {
+            match key.code {
                 KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
                 KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
-                KeyCode::Char('o') => self.open_draft(),
+                KeyCode::Char('o') => self.open_create_editor(),
+                KeyCode::Char('i') => self.open_update_editor(),
                 KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
                 KeyCode::Char('q') => self.exit = true,
                 _ => {}
-            },
-            InputMode::Insert => match key.code {
-                KeyCode::Char(character) => {
-                    if let Some(draft) = self.draft.as_mut() {
-                        draft.text.insert(draft.cursor, character);
-                        let insertion_end = draft.cursor + character.len_utf8();
-                        draft.cursor = boundary_at_or_after(&draft.text, insertion_end);
-                    }
-                }
-                KeyCode::Backspace => {
-                    if let Some(draft) = self.draft.as_mut()
-                        && draft.cursor > 0
-                    {
-                        let previous = previous_boundary(&draft.text, draft.cursor);
-                        draft.text.drain(previous..draft.cursor);
-                        draft.cursor = previous;
-                    }
-                }
-                KeyCode::Delete => {
-                    if let Some(draft) = self.draft.as_mut()
-                        && draft.cursor < draft.text.len()
-                    {
-                        let next = next_boundary(&draft.text, draft.cursor);
-                        draft.text.drain(draft.cursor..next);
-                    }
-                }
-                KeyCode::Left => {
-                    if let Some(draft) = self.draft.as_mut() {
-                        draft.cursor = previous_boundary(&draft.text, draft.cursor);
-                    }
-                }
-                KeyCode::Right => {
-                    if let Some(draft) = self.draft.as_mut() {
-                        draft.cursor = next_boundary(&draft.text, draft.cursor);
-                    }
-                }
-                KeyCode::Home => {
-                    if let Some(draft) = self.draft.as_mut() {
-                        draft.cursor = 0;
-                    }
-                }
-                KeyCode::End => {
-                    if let Some(draft) = self.draft.as_mut() {
-                        draft.cursor = draft.text.len();
-                    }
-                }
-                KeyCode::Enter => self.commit_draft(),
-                KeyCode::Esc => self.discard_draft(),
-                _ => {}
-            },
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Enter => {
+                self.commit_editor();
+                return;
+            }
+            KeyCode::Esc => {
+                self.discard_editor();
+                return;
+            }
+            _ => {}
+        }
+        let Mode::Insert(editor) = &mut self.mode else {
+            return;
+        };
+        match key.code {
+            KeyCode::Char(character) => {
+                editor.text.insert(editor.cursor, character);
+                let insertion_end = editor.cursor + character.len_utf8();
+                editor.cursor = boundary_at_or_after(&editor.text, insertion_end);
+            }
+            KeyCode::Backspace if editor.cursor > 0 => {
+                let previous = previous_boundary(&editor.text, editor.cursor);
+                editor.text.drain(previous..editor.cursor);
+                editor.cursor = previous;
+            }
+            KeyCode::Delete if editor.cursor < editor.text.len() => {
+                let next = next_boundary(&editor.text, editor.cursor);
+                editor.text.drain(editor.cursor..next);
+            }
+            KeyCode::Left => {
+                editor.cursor = previous_boundary(&editor.text, editor.cursor);
+            }
+            KeyCode::Right => {
+                editor.cursor = next_boundary(&editor.text, editor.cursor);
+            }
+            KeyCode::Home => editor.cursor = 0,
+            KeyCode::End => editor.cursor = editor.text.len(),
+            _ => {}
         }
     }
 }
@@ -570,15 +620,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme)
     );
 }
 
-fn render_footer(
-    frame: &mut Frame,
-    area: Rect,
-    input_mode: InputMode,
-    error: Option<&str>,
-    theme: &Theme,
-) {
+fn render_footer(frame: &mut Frame, area: Rect, mode: &Mode, error: Option<&str>, theme: &Theme) {
     let mode = Span::styled(
-        input_mode.label(),
+        mode.label(),
         Style::default()
             .fg(theme.mode_foreground)
             .bg(theme.mode_background)
@@ -600,14 +644,14 @@ fn render_footer(
 enum DisplayRow<'a> {
     Header(&'a BranchSection),
     Todo(&'a Todo),
-    Draft(&'a Draft),
+    Editor { editor: &'a Editor, completed: bool },
     Empty,
 }
 
 fn display_rows<'a>(
     sections: &'a [BranchSection],
     todos: &'a [Todo],
-    draft: Option<&'a Draft>,
+    editor: Option<&'a Editor>,
 ) -> Vec<DisplayRow<'a>> {
     let mut rows = Vec::new();
     for section in sections {
@@ -616,18 +660,43 @@ fn display_rows<'a>(
             .iter()
             .filter(|todo| todo.branch_ref == section.full_ref_name)
             .collect::<Vec<_>>();
-        let branch_draft = draft.filter(|draft| draft.branch_ref == section.full_ref_name);
-        if branch_todos.is_empty() && branch_draft.is_none() {
+        let create_editor = editor.filter(|editor| {
+            matches!(
+                &editor.target,
+                EditorTarget::Create { branch_ref, .. }
+                    if branch_ref == &section.full_ref_name
+            )
+        });
+        if branch_todos.is_empty() && create_editor.is_none() {
             rows.push(DisplayRow::Empty);
             continue;
         }
-        if branch_draft.is_some_and(|draft| draft.after.is_none()) {
-            rows.push(DisplayRow::Draft(branch_draft.expect("checked above")));
+        if create_editor.is_some_and(|editor| {
+            matches!(&editor.target, EditorTarget::Create { after: None, .. })
+        }) {
+            rows.push(DisplayRow::Editor {
+                editor: create_editor.expect("checked above"),
+                completed: false,
+            });
         }
         for todo in branch_todos {
-            rows.push(DisplayRow::Todo(todo));
-            if branch_draft.is_some_and(|draft| draft.after == Some(todo.id)) {
-                rows.push(DisplayRow::Draft(branch_draft.expect("checked above")));
+            if editor.is_some_and(
+                |editor| matches!(&editor.target, EditorTarget::Update { id } if *id == todo.id),
+            ) {
+                rows.push(DisplayRow::Editor {
+                    editor: editor.expect("checked above"),
+                    completed: todo.completed,
+                });
+            } else {
+                rows.push(DisplayRow::Todo(todo));
+            }
+            if create_editor.is_some_and(|editor| {
+                matches!(&editor.target, EditorTarget::Create { after, .. } if *after == Some(todo.id))
+            }) {
+                rows.push(DisplayRow::Editor {
+                    editor: create_editor.expect("checked above"),
+                    completed: false,
+                });
             }
         }
     }
@@ -713,17 +782,17 @@ fn layout_display_rows<'a>(rows: Vec<DisplayRow<'a>>, width: u16) -> Vec<Display
 fn row_has_focus(
     layout: &DisplayRowLayout<'_>,
     focus: Option<&Focus>,
-    draft: Option<&Draft>,
+    editor: Option<&Editor>,
 ) -> bool {
     match &layout.row {
         DisplayRow::Header(section) => {
-            draft.is_none()
+            editor.is_none()
                 && matches!(focus, Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name)
         }
         DisplayRow::Todo(todo) => {
-            draft.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id)
+            editor.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id)
         }
-        DisplayRow::Draft(_) => true,
+        DisplayRow::Editor { .. } => true,
         DisplayRow::Empty => false,
     }
 }
@@ -731,11 +800,11 @@ fn viewport_start(
     rows: &[DisplayRowLayout<'_>],
     height: u16,
     focus: Option<&Focus>,
-    draft: Option<&Draft>,
+    editor: Option<&Editor>,
 ) -> usize {
     let Some(focused) = rows
         .iter()
-        .position(|layout| row_has_focus(layout, focus, draft))
+        .position(|layout| row_has_focus(layout, focus, editor))
     else {
         return 0;
     };
@@ -761,7 +830,7 @@ fn render_branch_sections(
     todos: &[Todo],
     focus: Option<&Focus>,
     hovered: Option<&Focus>,
-    draft: Option<&Draft>,
+    editor: Option<&Editor>,
     theme: &Theme,
 ) {
     frame.render_widget(
@@ -783,8 +852,8 @@ fn render_branch_sections(
         return;
     }
 
-    let rows = layout_display_rows(display_rows(sections, todos, draft), area.width);
-    let first = viewport_start(&rows, area.height, focus, draft);
+    let rows = layout_display_rows(display_rows(sections, todos, editor), area.width);
+    let first = viewport_start(&rows, area.height, focus, editor);
     let mut rendered_y = 0usize;
 
     for layout in rows.iter().skip(first) {
@@ -803,7 +872,7 @@ fn render_branch_sections(
 
         match &layout.row {
             DisplayRow::Header(section) => {
-                let selected = draft.is_none()
+                let selected = editor.is_none()
                     && matches!(focus, Some(Focus::Branch(branch_ref)) if branch_ref == &section.full_ref_name);
                 let hovered = matches!(
                     hovered,
@@ -813,7 +882,7 @@ fn render_branch_sections(
             }
             DisplayRow::Todo(todo) => {
                 let selected =
-                    draft.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id);
+                    editor.is_none() && matches!(focus, Some(Focus::Todo(id)) if *id == todo.id);
                 let hovered = matches!(hovered, Some(Focus::Todo(id)) if *id == todo.id);
                 let background = if selected {
                     theme.selection_background
@@ -859,7 +928,9 @@ fn render_branch_sections(
                     frame.render_widget(Paragraph::new(title_lines).style(style), title_area);
                 }
             }
-            DisplayRow::Draft(draft) => render_draft(frame, row_area, draft, theme),
+            DisplayRow::Editor { editor, completed } => {
+                render_editor(frame, row_area, editor, *completed, theme);
+            }
             DisplayRow::Empty => {
                 frame.render_widget(
                     Paragraph::new("    No todos").style(
@@ -931,18 +1002,24 @@ fn render_branch_header(
     }
 }
 
-fn render_draft(frame: &mut Frame, area: Rect, draft: &Draft, theme: &Theme) {
-    const PREFIX: &str = "    [ ] ";
+fn render_editor(frame: &mut Frame, area: Rect, editor: &Editor, completed: bool, theme: &Theme) {
+    let marker = if completed { "[x]" } else { "[ ]" };
+    let prefix = format!("    {marker} ");
     let background = theme.selection_background;
+    let foreground = if completed {
+        theme.foreground_muted
+    } else {
+        theme.foreground
+    };
     frame.render_widget(
         Block::default().style(Style::default().bg(background)),
         area,
     );
-    let available = usize::from(area.width).saturating_sub(UnicodeWidthStr::width(PREFIX));
-    let before_cursor = &draft.text[..draft.cursor];
+    let available = usize::from(area.width).saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+    let before_cursor = &editor.text[..editor.cursor];
     let mut start = 0;
     let mut width = UnicodeWidthStr::width(before_cursor);
-    while width >= available.max(1) && start < draft.cursor {
+    while width >= available.max(1) && start < editor.cursor {
         let grapheme = before_cursor[start..]
             .graphemes(true)
             .next()
@@ -950,16 +1027,16 @@ fn render_draft(frame: &mut Frame, area: Rect, draft: &Draft, theme: &Theme) {
         start += grapheme.len();
         width = UnicodeWidthStr::width(&before_cursor[start..]);
     }
-    let visible = &draft.text[start..];
+    let visible = &editor.text[start..];
     frame.render_widget(
-        Paragraph::new(format!("{PREFIX}{visible}"))
-            .style(Style::default().fg(theme.foreground).bg(background)),
+        Paragraph::new(format!("{prefix}{visible}"))
+            .style(Style::default().fg(foreground).bg(background)),
         area,
     );
     if available > 0 {
         let cursor_x = area
             .x
-            .saturating_add(UnicodeWidthStr::width(PREFIX) as u16)
+            .saturating_add(UnicodeWidthStr::width(prefix.as_str()) as u16)
             .saturating_add(width as u16)
             .min(area.right().saturating_sub(1));
         frame.set_cursor_position(Position::new(cursor_x, area.y));
@@ -1017,9 +1094,8 @@ mod tests {
             persistence_available: true,
             todos: Vec::new(),
             focus,
-            draft: None,
+            mode: Mode::Normal,
             theme: test_theme(),
-            input_mode: InputMode::Normal,
             data_version: 0,
             error: None,
             pointer_position: None,
@@ -1035,6 +1111,13 @@ mod tests {
         for character in text.chars() {
             app.handle_key_event(key(KeyCode::Char(character)));
         }
+    }
+
+    fn editor(app: &App) -> &Editor {
+        let Mode::Insert(editor) = &app.mode else {
+            panic!("expected insert mode");
+        };
+        editor
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -1095,7 +1178,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "existing first", "existing second"]
         );
-        assert_eq!(app.input_mode, InputMode::Insert);
+        assert!(matches!(&app.mode, Mode::Insert(_)));
         type_text(&mut app, "second");
         app.handle_key_event(key(KeyCode::Enter));
         assert_eq!(
@@ -1137,26 +1220,168 @@ mod tests {
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "   ");
         app.handle_key_event(key(KeyCode::Enter));
-        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(matches!(&app.mode, Mode::Normal));
         assert!(app.store.load_all().unwrap().is_empty());
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "discard me");
         app.handle_key_event(key(KeyCode::Esc));
-        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(matches!(&app.mode, Mode::Normal));
         assert!(app.store.load_all().unwrap().is_empty());
     }
 
     #[test]
-    fn unavailable_persistence_does_not_open_a_draft() {
+    fn unavailable_persistence_does_not_open_an_editor() {
         let mut app = app_with_sections(vec![section("main")]);
         app.persistence_available = false;
         app.error = Some("database unavailable".to_owned());
 
         app.handle_key_event(key(KeyCode::Char('o')));
 
-        assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app.draft.is_none());
+        assert!(matches!(&app.mode, Mode::Normal));
         assert_eq!(app.error.as_deref(), Some("database unavailable"));
+    }
+
+    #[test]
+    fn edit_save_updates_title_and_returns_to_normal_with_focus() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "old", None)
+            .unwrap();
+        app.store.toggle_todo(todo.id).unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(todo.id));
+
+        app.handle_key_event(key(KeyCode::Char('i')));
+        assert_eq!(editor(&app).text, "old");
+        assert_eq!(editor(&app).cursor, "old".len());
+        app.handle_key_event(key(KeyCode::Home));
+        for _ in 0..3 {
+            app.handle_key_event(key(KeyCode::Delete));
+        }
+        type_text(&mut app, "new title");
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert!(matches!(&app.mode, Mode::Normal));
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+        let persisted = app.store.load_all().unwrap();
+        assert_eq!(persisted[0].title, "new title");
+        assert!(persisted[0].completed);
+        assert_eq!(app.todos[0].title, "new title");
+        assert!(app.todos[0].completed);
+    }
+
+    #[test]
+    fn edit_escape_cancels_without_changing_the_todo() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "unchanged", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(todo.id));
+
+        app.handle_key_event(key(KeyCode::Char('i')));
+        type_text(&mut app, " addition");
+        app.handle_key_event(key(KeyCode::Esc));
+
+        assert!(matches!(&app.mode, Mode::Normal));
+        assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+        assert_eq!(app.store.load_all().unwrap()[0].title, "unchanged");
+        assert_eq!(app.todos[0].title, "unchanged");
+    }
+
+    #[test]
+    fn blank_edit_is_rejected_and_retains_the_editor_buffer() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "keep", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(todo.id));
+
+        app.handle_key_event(key(KeyCode::Char('i')));
+        app.handle_key_event(key(KeyCode::Home));
+        for _ in 0..4 {
+            app.handle_key_event(key(KeyCode::Delete));
+        }
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert!(matches!(&app.mode, Mode::Insert(_)));
+        assert!(editor(&app).text.is_empty());
+        assert_eq!(editor(&app).cursor, 0);
+        assert!(app.error.is_some());
+        assert_eq!(app.store.load_all().unwrap()[0].title, "keep");
+        assert_eq!(app.todos[0].title, "keep");
+    }
+
+    #[test]
+    fn failed_edit_keeps_the_editor_buffer_and_original_todo() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let todo = app
+            .store
+            .insert_todo("refs/heads/main", "original", None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(todo.id));
+        app.handle_key_event(key(KeyCode::Char('i')));
+        type_text(&mut app, " retained");
+        let Mode::Insert(active_editor) = &mut app.mode else {
+            panic!("expected insert mode");
+        };
+        active_editor.target = EditorTarget::Update { id: i64::MAX };
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert!(matches!(&app.mode, Mode::Insert(_)));
+        assert_eq!(editor(&app).text, "original retained");
+        assert!(app.error.is_some());
+        assert_eq!(app.store.load_all().unwrap()[0].title, "original");
+        assert_eq!(app.todos[0].title, "original");
+    }
+
+    #[test]
+    fn branch_i_is_a_no_op() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let focus = app.focus.clone();
+        app.error = Some("existing error".to_owned());
+
+        app.handle_key_event(key(KeyCode::Char('i')));
+
+        assert!(matches!(&app.mode, Mode::Normal));
+        assert_eq!(app.focus, focus);
+        assert_eq!(app.error.as_deref(), Some("existing error"));
+    }
+
+    #[test]
+    fn edit_renders_in_place_with_the_original_completion_marker() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        let second = app
+            .store
+            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .unwrap();
+        app.store.toggle_todo(second.id).unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(second.id));
+        app.handle_key_event(key(KeyCode::Char('i')));
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert!(row_text(&terminal, 3).contains("[ ] first"));
+        assert!(row_text(&terminal, 4).contains("[x] second"));
+        assert!(!row_text(&terminal, 5).contains("["));
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            Position::new(15, 4)
+        );
+        assert_eq!(app.focus, Some(Focus::Todo(second.id)));
     }
 
     #[test]
@@ -1245,8 +1470,8 @@ mod tests {
         app.handle_key_event(key(KeyCode::Char('x')));
         app.handle_key_event(key(KeyCode::Char(' ')));
 
-        assert_eq!(app.input_mode, InputMode::Insert);
-        assert_eq!(app.draft.as_ref().unwrap().text, "x ");
+        assert!(matches!(&app.mode, Mode::Insert(_)));
+        assert_eq!(editor(&app).text, "x ");
         assert!(app.store.load_all().unwrap().is_empty());
     }
 
@@ -1263,16 +1488,22 @@ mod tests {
     }
 
     #[test]
-    fn failed_commit_keeps_the_draft_and_insert_mode() {
+    fn failed_commit_keeps_the_editor_and_insert_mode() {
         let mut app = app_with_sections(vec![section("main")]);
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "keep me");
-        app.draft.as_mut().unwrap().after = Some(i64::MAX);
+        let Mode::Insert(active_editor) = &mut app.mode else {
+            panic!("expected insert mode");
+        };
+        let EditorTarget::Create { after, .. } = &mut active_editor.target else {
+            panic!("expected create editor");
+        };
+        *after = Some(i64::MAX);
 
         app.handle_key_event(key(KeyCode::Enter));
 
-        assert_eq!(app.input_mode, InputMode::Insert);
-        assert_eq!(app.draft.as_ref().unwrap().text, "keep me");
+        assert!(matches!(&app.mode, Mode::Insert(_)));
+        assert_eq!(editor(&app).text, "keep me");
         assert!(app.error.is_some());
         assert!(app.store.load_all().unwrap().is_empty());
     }
@@ -1290,8 +1521,8 @@ mod tests {
         app.handle_key_event(key(KeyCode::Left));
         app.handle_key_event(key(KeyCode::Delete));
         app.handle_key_event(key(KeyCode::End));
-        assert_eq!(app.draft.as_ref().unwrap().text, "好é");
-        assert_eq!(app.draft.as_ref().unwrap().cursor, "好é".len());
+        assert_eq!(editor(&app).text, "好é");
+        assert_eq!(editor(&app).cursor, "好é".len());
     }
 
     #[test]
@@ -1303,11 +1534,11 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::Char('\u{200d}')));
 
-        let draft = app.draft.as_ref().unwrap();
-        assert_eq!(draft.text, "👩‍🔬");
-        assert_eq!(draft.cursor, draft.text.len());
+        let input = editor(&app);
+        assert_eq!(input.text, "👩‍🔬");
+        assert_eq!(input.cursor, input.text.len());
         app.handle_key_event(key(KeyCode::Backspace));
-        assert!(app.draft.as_ref().unwrap().text.is_empty());
+        assert!(editor(&app).text.is_empty());
     }
 
     #[test]
@@ -1372,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn draft_scrolling_does_not_split_emoji_graphemes() {
+    fn editor_scrolling_does_not_split_emoji_graphemes() {
         let mut app = app_with_sections(vec![section("main")]);
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "👩‍🔬");
@@ -1539,7 +1770,7 @@ mod tests {
 
         app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 4));
 
-        assert_eq!(app.input_mode, InputMode::Insert);
+        assert!(matches!(&app.mode, Mode::Insert(_)));
         assert_eq!(app.focus, original_focus);
     }
 
