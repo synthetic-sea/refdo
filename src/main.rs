@@ -683,22 +683,33 @@ impl App {
             self.error = None;
             return;
         }
-        if name != "clean" {
+        if name != "clean" && name != "sort" {
             self.error = Some(format!("Unknown command: {name}"));
             return;
         }
         if !self.persistence_available {
-            self.error = Some("clean: persistence unavailable".to_owned());
+            self.error = Some(format!("{name}: persistence unavailable"));
             return;
         }
         let Some(target_branch) = target_branch else {
-            self.error = Some("clean: no focused branch".to_owned());
+            self.error = Some(format!("{name}: no focused branch"));
             return;
         };
 
         let previous_focus = self.focus.clone();
-        match self.store.delete_completed_todos(&target_branch) {
-            Ok(removed) => {
+        let result = match name.as_str() {
+            "clean" => self
+                .store
+                .delete_completed_todos(&target_branch)
+                .map(|count| format!("clean: removed {count} completed items")),
+            "sort" => self
+                .store
+                .sort_todos(&target_branch)
+                .map(|count| format!("sort: sorted {count} items")),
+            _ => unreachable!("command name was validated"),
+        };
+        match result {
+            Ok(message) => {
                 if !self.reload() {
                     return;
                 }
@@ -715,9 +726,9 @@ impl App {
                 } else {
                     Some(Focus::Branch(target_branch))
                 };
-                self.error = Some(format!("clean: removed {removed} completed items"));
+                self.error = Some(message);
             }
-            Err(error) => self.error = Some(format!("clean: {error}")),
+            Err(error) => self.error = Some(format!("{name}: {error}")),
         }
     }
 
@@ -2997,6 +3008,142 @@ mod tests {
             branch_titles(&app, "refs/heads/main"),
             vec![("cut sentinel".to_owned(), false)]
         );
+    }
+    #[test]
+    fn sort_orders_only_target_branch_persists_and_preserves_todo_focus_and_cut_buffer() {
+        let mut app = app_with_sections(vec![section("main"), section("feature")]);
+        app.store
+            .insert_todo("refs/heads/main", "first active", None)
+            .unwrap();
+        let first_completed = app
+            .store
+            .insert_todo("refs/heads/main", "first completed", None)
+            .unwrap();
+        let second_active = app
+            .store
+            .insert_todo("refs/heads/main", "second active", None)
+            .unwrap();
+        let second_completed = app
+            .store
+            .insert_todo("refs/heads/main", "second completed", None)
+            .unwrap();
+        let feature_first = app
+            .store
+            .insert_todo("refs/heads/feature", "feature first", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/feature", "feature second", None)
+            .unwrap();
+        app.store.toggle_todo(first_completed.id).unwrap();
+        app.store.toggle_todo(second_completed.id).unwrap();
+        app.reload();
+        let feature_before = branch_titles(&app, "refs/heads/feature");
+        app.focus = Some(Focus::Todo(second_active.id));
+        app.cut_buffer = Some(feature_first.clone());
+
+        run_command(&mut app, " sort ");
+
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![
+                ("first active".to_owned(), false),
+                ("second active".to_owned(), false),
+                ("first completed".to_owned(), true),
+                ("second completed".to_owned(), true),
+            ]
+        );
+        assert_eq!(branch_titles(&app, "refs/heads/feature"), feature_before);
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+        assert_eq!(app.focus, Some(Focus::Todo(second_active.id)));
+        assert_eq!(
+            app.cut_buffer.as_ref().map(|todo| todo.id),
+            Some(feature_first.id)
+        );
+        assert_eq!(app.error.as_deref(), Some("sort: sorted 4 items"));
+        assert!(matches!(&app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn sort_uses_branch_captured_when_command_mode_opened_and_preserves_header_focus() {
+        let mut app = app_with_sections(vec![section("main"), section("feature")]);
+        app.store
+            .insert_todo("refs/heads/main", "main first", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "main second", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/feature", "feature first", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/feature", "feature second", None)
+            .unwrap();
+        app.reload();
+        let feature_before = branch_titles(&app, "refs/heads/feature");
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.handle_key_event(key(KeyCode::Char(':')));
+        type_text(&mut app, "sort");
+        app.focus = Some(Focus::Branch("refs/heads/feature".to_owned()));
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![
+                ("main first".to_owned(), false),
+                ("main second".to_owned(), false),
+            ]
+        );
+        assert_eq!(branch_titles(&app, "refs/heads/feature"), feature_before);
+        assert_eq!(
+            app.focus,
+            Some(Focus::Branch("refs/heads/feature".to_owned()))
+        );
+        assert_eq!(app.error.as_deref(), Some("sort: sorted 2 items"));
+        assert!(matches!(&app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn sort_empty_target_reports_zero_and_preserves_header_focus() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.focus = focus.clone();
+
+        run_command(&mut app, "sort");
+
+        assert!(app.todos.is_empty());
+        assert!(app.store.load_all().unwrap().is_empty());
+        assert_eq!(app.focus, focus);
+        assert_eq!(app.error.as_deref(), Some("sort: sorted 0 items"));
+        assert!(matches!(&app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn sort_without_focus_or_persistence_fails_without_reordering() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "second", None)
+            .unwrap();
+        app.reload();
+        let before = app.todos.clone();
+        app.focus = None;
+
+        run_command(&mut app, "sort");
+
+        assert_eq!(app.error.as_deref(), Some("sort: no focused branch"));
+        assert_eq!(app.store.load_all().unwrap(), before);
+        assert!(matches!(&app.mode, Mode::Normal));
+
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.persistence_available = false;
+        run_command(&mut app, "sort");
+
+        assert_eq!(app.error.as_deref(), Some("sort: persistence unavailable"));
+        assert_eq!(app.store.load_all().unwrap(), before);
+        assert!(matches!(&app.mode, Mode::Normal));
     }
 }
 
