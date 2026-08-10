@@ -275,37 +275,30 @@ impl TodoStore {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        if ordered_todos.is_empty() {
-            transaction.commit()?;
-            return Ok(0);
-        }
 
-        let maximum_order = ordered_todos
-            .iter()
-            .map(|(_, sort_order)| *sort_order)
-            .max()
-            .expect("non-empty todo ordering has a maximum");
-        let temporary_start = maximum_order
-            .checked_add(1)
-            .ok_or(StoreError::OrderingOverflow)?;
-        for (index, (id, _)) in ordered_todos.iter().enumerate() {
-            let index = i64::try_from(index).map_err(|_| StoreError::OrderingOverflow)?;
-            let temporary_order = temporary_start
-                .checked_add(index)
-                .ok_or(StoreError::OrderingOverflow)?;
-            transaction.execute(
-                "UPDATE todos SET sort_order = ?1 WHERE id = ?2",
-                params![temporary_order, id],
-            )?;
-        }
+        write_todo_order(&transaction, &ordered_todos)?;
+        transaction.commit()?;
+        Ok(ordered_todos.len())
+    }
 
-        for (sort_order, (id, _)) in ordered_todos.iter().enumerate() {
-            let sort_order = i64::try_from(sort_order).map_err(|_| StoreError::OrderingOverflow)?;
-            transaction.execute(
-                "UPDATE todos SET sort_order = ?1 WHERE id = ?2",
-                params![sort_order, id],
+    pub fn group_todos(&mut self, branch_ref: &str) -> Result<usize, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ordered_todos = {
+            let mut statement = transaction.prepare(
+                "SELECT id, sort_order
+                 FROM todos
+                 WHERE branch_ref = ?1
+                 ORDER BY completed ASC, sort_order ASC, id ASC",
             )?;
-        }
+            let rows = statement.query_map([branch_ref], |row| {
+                Ok((row.get::<_, TodoId>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        write_todo_order(&transaction, &ordered_todos)?;
         transaction.commit()?;
         Ok(ordered_todos.len())
     }
@@ -374,6 +367,41 @@ impl TodoStore {
             .connection
             .query_row("PRAGMA data_version", [], |row| row.get(0))?)
     }
+}
+
+fn write_todo_order(
+    transaction: &rusqlite::Transaction<'_>,
+    ordered_todos: &[(TodoId, i64)],
+) -> Result<(), StoreError> {
+    let Some(maximum_order) = ordered_todos
+        .iter()
+        .map(|(_, sort_order)| *sort_order)
+        .max()
+    else {
+        return Ok(());
+    };
+    let temporary_start = maximum_order
+        .checked_add(1)
+        .ok_or(StoreError::OrderingOverflow)?;
+    for (index, (id, _)) in ordered_todos.iter().enumerate() {
+        let index = i64::try_from(index).map_err(|_| StoreError::OrderingOverflow)?;
+        let temporary_order = temporary_start
+            .checked_add(index)
+            .ok_or(StoreError::OrderingOverflow)?;
+        transaction.execute(
+            "UPDATE todos SET sort_order = ?1 WHERE id = ?2",
+            params![temporary_order, id],
+        )?;
+    }
+
+    for (sort_order, (id, _)) in ordered_todos.iter().enumerate() {
+        let sort_order = i64::try_from(sort_order).map_err(|_| StoreError::OrderingOverflow)?;
+        transaction.execute(
+            "UPDATE todos SET sort_order = ?1 WHERE id = ?2",
+            params![sort_order, id],
+        )?;
+    }
+    Ok(())
 }
 
 fn configure_connection(connection: &Connection, file_backed: bool) -> Result<(), StoreError> {
@@ -723,6 +751,116 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.sort_todos("refs/heads/missing").unwrap(), 0);
+        assert_eq!(store.load_all().unwrap(), vec![existing]);
+    }
+
+    #[test]
+    fn groups_only_the_requested_branch_without_reordering_within_completion_states() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let completed_first = store
+            .insert_todo_with_completion("refs/heads/main", "completed first", true, None)
+            .unwrap();
+        let incomplete_first = store
+            .insert_todo(
+                "refs/heads/main",
+                "incomplete first",
+                Some(completed_first.id),
+            )
+            .unwrap();
+        let completed_second = store
+            .insert_todo_with_completion(
+                "refs/heads/main",
+                "completed second",
+                true,
+                Some(incomplete_first.id),
+            )
+            .unwrap();
+        let incomplete_second = store
+            .insert_todo(
+                "refs/heads/main",
+                "incomplete second",
+                Some(completed_second.id),
+            )
+            .unwrap();
+        let other_completed = store
+            .insert_todo_with_completion("refs/heads/other", "other completed", true, None)
+            .unwrap();
+        let other_incomplete = store
+            .insert_todo(
+                "refs/heads/other",
+                "other incomplete",
+                Some(other_completed.id),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE todos
+                 SET created_at = CASE id
+                     WHEN ?1 THEN 30
+                     WHEN ?2 THEN 40
+                     WHEN ?3 THEN 5
+                     WHEN ?4 THEN 10
+                     ELSE created_at
+                 END
+                 WHERE branch_ref = 'refs/heads/main'",
+                params![
+                    completed_first.id,
+                    incomplete_first.id,
+                    completed_second.id,
+                    incomplete_second.id,
+                ],
+            )
+            .unwrap();
+        let other_before = store
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .filter(|todo| todo.branch_ref == "refs/heads/other")
+            .collect::<Vec<_>>();
+
+        assert_eq!(store.group_todos("refs/heads/main").unwrap(), 4);
+
+        let grouped = store.load_all().unwrap();
+        let main = grouped
+            .iter()
+            .filter(|todo| todo.branch_ref == "refs/heads/main")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            main.iter().map(|todo| todo.id).collect::<Vec<_>>(),
+            vec![
+                incomplete_first.id,
+                incomplete_second.id,
+                completed_first.id,
+                completed_second.id,
+            ]
+        );
+        assert_eq!(
+            main.iter().map(|todo| todo.sort_order).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(
+            grouped
+                .iter()
+                .filter(|todo| todo.branch_ref == "refs/heads/other")
+                .cloned()
+                .collect::<Vec<_>>(),
+            other_before
+        );
+
+        assert_eq!(store.group_todos("refs/heads/main").unwrap(), 4);
+        assert_eq!(store.load_all().unwrap(), grouped);
+        assert_eq!(other_before, vec![other_completed, other_incomplete]);
+    }
+
+    #[test]
+    fn grouping_an_empty_branch_returns_zero_without_modifying_data() {
+        let mut store = TodoStore::open_in_memory().unwrap();
+        let existing = store
+            .insert_todo("refs/heads/main", "existing", None)
+            .unwrap();
+
+        assert_eq!(store.group_todos("refs/heads/missing").unwrap(), 0);
         assert_eq!(store.load_all().unwrap(), vec![existing]);
     }
 

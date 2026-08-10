@@ -728,7 +728,7 @@ impl App {
             self.error = None;
             return;
         }
-        if name != "prune" && name != "sort" && name != "clear" {
+        if name != "prune" && name != "sort" && name != "group" && name != "clear" {
             self.error = Some(format!("Unknown command: {name}"));
             return;
         }
@@ -755,6 +755,10 @@ impl App {
                 .store
                 .sort_todos(&target_branch)
                 .map(|count| format!("sort: sorted {count} items")),
+            "group" => self
+                .store
+                .group_todos(&target_branch)
+                .map(|count| format!("group: grouped {count} items")),
             _ => unreachable!("command name was validated"),
         };
         match result {
@@ -3322,6 +3326,113 @@ mod tests {
         run_command(&mut app, "sort");
 
         assert_eq!(app.error.as_deref(), Some("sort: persistence unavailable"));
+        assert_eq!(app.store.load_all().unwrap(), before);
+        assert!(matches!(&app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn group_stably_partitions_only_captured_branch_and_preserves_app_state() {
+        let mut app = app_with_sections(vec![section("main"), section("feature")]);
+        let first_active = app
+            .store
+            .insert_todo("refs/heads/main", "first active", None)
+            .unwrap();
+        let first_completed = app
+            .store
+            .insert_todo("refs/heads/main", "first completed", Some(first_active.id))
+            .unwrap();
+        let second_active = app
+            .store
+            .insert_todo("refs/heads/main", "second active", Some(first_completed.id))
+            .unwrap();
+        let second_completed = app
+            .store
+            .insert_todo(
+                "refs/heads/main",
+                "second completed",
+                Some(second_active.id),
+            )
+            .unwrap();
+        let feature_completed = app
+            .store
+            .insert_todo("refs/heads/feature", "feature completed", None)
+            .unwrap();
+        let feature_active = app
+            .store
+            .insert_todo(
+                "refs/heads/feature",
+                "feature active",
+                Some(feature_completed.id),
+            )
+            .unwrap();
+        app.store.toggle_todo(first_completed.id).unwrap();
+        app.store.toggle_todo(second_completed.id).unwrap();
+        app.store.toggle_todo(feature_completed.id).unwrap();
+        app.reload();
+        assert_eq!(
+            branch_titles(&app, "refs/heads/main"),
+            vec![
+                ("first active".to_owned(), false),
+                ("first completed".to_owned(), true),
+                ("second active".to_owned(), false),
+                ("second completed".to_owned(), true),
+            ]
+        );
+        let feature_before = branch_titles(&app, "refs/heads/feature");
+        app.focus = Some(Focus::Todo(first_active.id));
+        app.cut_buffer = Some(feature_completed.clone());
+        app.handle_key_event(key(KeyCode::Char(':')));
+        type_text(&mut app, " group ");
+        app.focus = Some(Focus::Todo(feature_active.id));
+
+        app.handle_key_event(key(KeyCode::Enter));
+
+        let expected_main = vec![
+            ("first active".to_owned(), false),
+            ("second active".to_owned(), false),
+            ("first completed".to_owned(), true),
+            ("second completed".to_owned(), true),
+        ];
+        assert_eq!(branch_titles(&app, "refs/heads/main"), expected_main);
+        assert_eq!(branch_titles(&app, "refs/heads/feature"), feature_before);
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+        assert_eq!(app.focus, Some(Focus::Todo(feature_active.id)));
+        assert_eq!(
+            app.cut_buffer.as_ref().map(|todo| todo.id),
+            Some(feature_completed.id)
+        );
+        assert_eq!(app.error.as_deref(), Some("group: grouped 4 items"));
+        assert!(matches!(&app.mode, Mode::Normal));
+
+        app.reload();
+        assert_eq!(branch_titles(&app, "refs/heads/main"), expected_main);
+        assert_eq!(branch_titles(&app, "refs/heads/feature"), feature_before);
+    }
+
+    #[test]
+    fn group_without_focus_or_persistence_fails_without_reordering() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "second", None)
+            .unwrap();
+        app.reload();
+        let before = app.todos.clone();
+        app.focus = None;
+
+        run_command(&mut app, "group");
+
+        assert_eq!(app.error.as_deref(), Some("group: no focused branch"));
+        assert_eq!(app.store.load_all().unwrap(), before);
+        assert!(matches!(&app.mode, Mode::Normal));
+
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.persistence_available = false;
+        run_command(&mut app, "group");
+
+        assert_eq!(app.error.as_deref(), Some("group: persistence unavailable"));
         assert_eq!(app.store.load_all().unwrap(), before);
         assert!(matches!(&app.mode, Mode::Normal));
     }
