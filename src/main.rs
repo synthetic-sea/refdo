@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Padding, Paragraph},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -196,7 +196,8 @@ impl App {
         render_status_bar(frame, status_area, &self.repository.head_label, &self.theme);
         let content_block = Block::bordered()
             .style(Style::default().bg(self.theme.background))
-            .border_style(Style::default().fg(self.theme.mode_background));
+            .border_style(Style::default().fg(self.theme.mode_background))
+            .padding(Padding::horizontal(1));
         let todo_area = todo_viewport_area(self.frame_area);
         frame.render_widget(content_block, content_area);
         render_branch_sections(
@@ -961,7 +962,9 @@ fn app_areas(area: Rect) -> [Rect; 3] {
 
 fn todo_viewport_area(frame_area: Rect) -> Rect {
     let [_, content_area, _] = app_areas(frame_area);
-    Block::bordered().inner(content_area)
+    Block::bordered()
+        .padding(Padding::horizontal(1))
+        .inner(content_area)
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, branch: &str, theme: &Theme) {
@@ -2117,7 +2120,7 @@ mod tests {
         assert!(!row_text(&terminal, 5).contains("󰄲"));
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position::new(13, 4)
+            Position::new(14, 4)
         );
         assert_eq!(app.focus, Some(Focus::Todo(second.id)));
     }
@@ -2457,16 +2460,16 @@ mod tests {
         let mut app = app_with_sections(vec![section("main")]);
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "👩‍🔬");
-        let backend = TestBackend::new(12, 5);
+        let backend = TestBackend::new(14, 5);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position::new(9, 2)
+            Position::new(10, 2)
         );
-        assert_eq!(terminal.backend().buffer()[(7, 2)].symbol(), "👩‍🔬");
+        assert_eq!(terminal.backend().buffer()[(8, 2)].symbol(), "👩‍🔬");
     }
 
     #[test]
@@ -2683,7 +2686,7 @@ mod tests {
             is_stored_only: true,
         };
         let mut app = app_with_sections(vec![normal, stored]);
-        let backend = TestBackend::new(21, 9);
+        let backend = TestBackend::new(23, 9);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(row_text(&terminal, 1).starts_with('┌'));
@@ -2692,12 +2695,13 @@ mod tests {
             theme.mode_background
         );
         assert!(!row_text(&terminal, 2).contains("WORKTREE"));
-        assert!(row_text(&terminal, 2).starts_with("│󰍝 very-long-branch"));
+        assert!(row_text(&terminal, 2).starts_with("│ 󰍝 very-long-branch"));
         assert!(row_text(&terminal, 3).contains("No todos"));
         assert!(row_text(&terminal, 4).contains("BRANCH"));
         assert!(row_text(&terminal, 7).starts_with('└'));
+        assert_eq!(terminal.backend().buffer()[(1, 2)].bg, theme.background);
         assert_eq!(
-            terminal.backend().buffer()[(1, 2)].bg,
+            terminal.backend().buffer()[(2, 2)].bg,
             theme.selection_background
         );
     }
@@ -2713,14 +2717,14 @@ mod tests {
             .insert_todo("refs/heads/main", "following", Some(first.id))
             .unwrap();
         app.reload();
-        let backend = TestBackend::new(24, 9);
+        let backend = TestBackend::new(26, 9);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 3).starts_with("│    󰄱 alpha beta gamma"));
-        assert!(row_text(&terminal, 4).starts_with("│      delta"));
-        assert!(row_text(&terminal, 5).starts_with("│    󰄱 following"));
+        assert!(row_text(&terminal, 3).starts_with("│     󰄱 alpha beta gamma"));
+        assert!(row_text(&terminal, 4).starts_with("│       delta"));
+        assert!(row_text(&terminal, 5).starts_with("│     󰄱 following"));
     }
 
     #[test]
@@ -2733,23 +2737,23 @@ mod tests {
         app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
         app.handle_key_event(key(KeyCode::Char('o')));
         type_text(&mut app, "alpha beta gamma delta");
-        let backend = TestBackend::new(24, 9);
+        let backend = TestBackend::new(26, 9);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 3).starts_with("│    󰄱 alpha beta gamma"));
-        assert!(row_text(&terminal, 4).starts_with("│      delta"));
-        assert!(row_text(&terminal, 5).starts_with("│    󰄱 following"));
+        assert!(row_text(&terminal, 3).starts_with("│     󰄱 alpha beta gamma"));
+        assert!(row_text(&terminal, 4).starts_with("│       delta"));
+        assert!(row_text(&terminal, 5).starts_with("│     󰄱 following"));
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position::new(12, 4)
+            Position::new(13, 4)
         );
 
         for expected in [
-            Position::new(7, 4),
-            Position::new(18, 3),
-            Position::new(13, 3),
+            Position::new(8, 4),
+            Position::new(19, 3),
+            Position::new(14, 3),
         ] {
             app.handle_key_event(modified_key(KeyCode::Left, KeyModifiers::CONTROL));
             terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -2767,21 +2771,21 @@ mod tests {
             .insert_todo("refs/heads/main", "ab👩‍🔬cd界ef\nnext", None)
             .unwrap();
         app.reload();
-        let backend = TestBackend::new(16, 9);
+        let backend = TestBackend::new(18, 9);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 3).starts_with("│    󰄱 ab"));
-        assert!(row_text(&terminal, 4).starts_with("│      ef"));
-        assert!(row_text(&terminal, 5).starts_with("│      next"));
+        assert!(row_text(&terminal, 3).starts_with("│     󰄱 ab"));
+        assert!(row_text(&terminal, 4).starts_with("│       ef"));
+        assert!(row_text(&terminal, 5).starts_with("│       next"));
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(9, 3)].symbol(), "👩‍🔬");
-        assert_eq!(buffer[(11, 3)].symbol(), "c");
-        assert_eq!(buffer[(12, 3)].symbol(), "d");
-        assert_eq!(buffer[(13, 3)].symbol(), "界");
-        assert_eq!(buffer[(7, 4)].symbol(), "e");
-        assert_eq!(buffer[(8, 4)].symbol(), "f");
+        assert_eq!(buffer[(10, 3)].symbol(), "👩‍🔬");
+        assert_eq!(buffer[(12, 3)].symbol(), "c");
+        assert_eq!(buffer[(13, 3)].symbol(), "d");
+        assert_eq!(buffer[(14, 3)].symbol(), "界");
+        assert_eq!(buffer[(8, 4)].symbol(), "e");
+        assert_eq!(buffer[(9, 4)].symbol(), "f");
     }
 
     #[test]
@@ -2793,13 +2797,15 @@ mod tests {
             .unwrap();
         app.reload();
         let theme = app.theme;
-        let backend = TestBackend::new(24, 8);
+        let backend = TestBackend::new(26, 8);
         let mut terminal = Terminal::new(backend).unwrap();
 
         app.focus = Some(Focus::Todo(todo.id));
         terminal.draw(|frame| app.draw(frame)).unwrap();
         for row in [3, 4] {
-            for column in 1..23 {
+            assert_eq!(terminal.backend().buffer()[(1, row)].bg, theme.background);
+            assert_eq!(terminal.backend().buffer()[(24, row)].bg, theme.background);
+            for column in 2..24 {
                 assert_eq!(
                     terminal.backend().buffer()[(column, row)].bg,
                     theme.selection_background
@@ -2811,7 +2817,9 @@ mod tests {
         app.handle_mouse_event(mouse(MouseEventKind::Moved, 10, 4));
         terminal.draw(|frame| app.draw(frame)).unwrap();
         for row in [3, 4] {
-            for column in 1..23 {
+            assert_eq!(terminal.backend().buffer()[(1, row)].bg, theme.background);
+            assert_eq!(terminal.backend().buffer()[(24, row)].bg, theme.background);
+            for column in 2..24 {
                 assert_eq!(
                     terminal.backend().buffer()[(column, row)].bg,
                     theme.hover_background
@@ -2837,17 +2845,17 @@ mod tests {
         app.reload();
         app.focus = Some(Focus::Todo(wrapped.id));
         let theme = app.theme;
-        let backend = TestBackend::new(18, 7);
+        let backend = TestBackend::new(20, 7);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        assert!(row_text(&terminal, 2).starts_with("│    󰄱 leading"));
-        assert!(row_text(&terminal, 3).starts_with("│    󰄱 one two"));
-        assert!(row_text(&terminal, 4).starts_with("│      three"));
+        assert!(row_text(&terminal, 2).starts_with("│     󰄱 leading"));
+        assert!(row_text(&terminal, 3).starts_with("│     󰄱 one two"));
+        assert!(row_text(&terminal, 4).starts_with("│       three"));
         for row in [3, 4] {
             assert_eq!(
-                terminal.backend().buffer()[(1, row)].bg,
+                terminal.backend().buffer()[(2, row)].bg,
                 theme.selection_background
             );
         }
