@@ -105,6 +105,8 @@ struct App {
     error: Option<String>,
     pointer_position: Option<Position>,
     frame_area: Rect,
+    viewport_start: usize,
+    reveal_focus: bool,
 }
 
 impl Default for App {
@@ -166,6 +168,8 @@ impl App {
             error,
             pointer_position: None,
             frame_area: Rect::default(),
+            viewport_start: 0,
+            reveal_focus: true,
         }
     }
 
@@ -188,17 +192,31 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         self.frame_area = frame.area();
+        let [status_area, content_area, footer_area] = app_areas(self.frame_area);
+        let todo_area = todo_viewport_area(self.frame_area);
+        let editor = self.mode.editor();
+        let rows = layout_display_rows(
+            display_rows(&self.repository.sections, &self.todos, editor),
+            todo_area.width,
+        );
+        self.viewport_start = reconcile_viewport_start(
+            &rows,
+            todo_area.height,
+            self.viewport_start,
+            self.reveal_focus,
+            self.focus.as_ref(),
+            editor,
+        );
+        self.reveal_focus = false;
         let hovered = self
             .pointer_position
             .and_then(|position| self.focus_at(position));
-        let [status_area, content_area, footer_area] = app_areas(self.frame_area);
 
         render_status_bar(frame, status_area, &self.repository.head_label, &self.theme);
         let content_block = Block::bordered()
             .style(Style::default().bg(self.theme.background))
             .border_style(Style::default().fg(self.theme.mode_background))
             .padding(Padding::horizontal(1));
-        let todo_area = todo_viewport_area(self.frame_area);
         frame.render_widget(content_block, content_area);
         render_branch_sections(
             frame,
@@ -208,6 +226,7 @@ impl App {
             self.focus.as_ref(),
             hovered.as_ref(),
             self.mode.editor(),
+            self.viewport_start,
             &self.theme,
         );
         render_footer(
@@ -234,7 +253,25 @@ impl App {
     fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
         let position = Position::new(mouse_event.column, mouse_event.row);
         self.pointer_position = Some(position);
-        if matches!(&self.mode, Mode::Normal)
+        if matches!(
+            mouse_event.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && todo_viewport_area(self.frame_area).contains(position)
+        {
+            let area = todo_viewport_area(self.frame_area);
+            let rows = layout_display_rows(
+                display_rows(&self.repository.sections, &self.todos, self.mode.editor()),
+                area.width,
+            );
+            let maximum = maximum_viewport_start(&rows, area.height);
+            self.viewport_start = match mouse_event.kind {
+                MouseEventKind::ScrollUp => self.viewport_start.saturating_sub(1),
+                MouseEventKind::ScrollDown => self.viewport_start.saturating_add(1).min(maximum),
+                _ => unreachable!("only wheel events enter this branch"),
+            }
+            .min(maximum);
+            self.reveal_focus = false;
+        } else if matches!(&self.mode, Mode::Normal)
             && mouse_event.kind == MouseEventKind::Down(MouseButton::Left)
         {
             self.focus = self.focus_at(position);
@@ -251,7 +288,9 @@ impl App {
             display_rows(&self.repository.sections, &self.todos, editor),
             area.width,
         );
-        let first = viewport_start(&rows, area.height, self.focus.as_ref(), editor);
+        let first = self
+            .viewport_start
+            .min(maximum_viewport_start(&rows, area.height));
         let target_y = usize::from(position.y - area.y);
         let mut rendered_y = 0;
         for layout in rows.iter().skip(first) {
@@ -369,6 +408,7 @@ impl App {
 
     fn move_focus(&mut self, delta: isize) {
         let rows = self.flattened_focuses();
+        self.reveal_focus = true;
         let Some(current) = self
             .focus
             .as_ref()
@@ -390,6 +430,7 @@ impl App {
     }
 
     fn move_section_focus(&mut self, forward: bool) {
+        self.reveal_focus = true;
         let Some((current, on_header)) = self.focus.as_ref().and_then(|focus| match focus {
             Focus::Branch(branch_ref) => self
                 .repository
@@ -456,6 +497,7 @@ impl App {
             text: String::new(),
             cursor: 0,
         });
+        self.reveal_focus = true;
         self.error = None;
     }
 
@@ -475,6 +517,7 @@ impl App {
             text: todo.title.clone(),
             cursor: todo.title.len(),
         });
+        self.reveal_focus = true;
         self.error = None;
     }
 
@@ -488,6 +531,7 @@ impl App {
         }
         self.mode = Mode::Normal;
         self.error = None;
+        self.reveal_focus = true;
     }
 
     fn commit_editor(&mut self) {
@@ -524,6 +568,7 @@ impl App {
                         if self.reload() {
                             self.error = None;
                         }
+                        self.reveal_focus = true;
                     }
                     Err(error) => self.error = Some(error.to_string()),
                 }
@@ -536,6 +581,7 @@ impl App {
                     self.focus = Some(Focus::Todo(id));
                     self.mode = Mode::Normal;
                     self.error = None;
+                    self.reveal_focus = true;
                 }
                 Err(error) => self.error = Some(error.to_string()),
             },
@@ -864,7 +910,11 @@ impl App {
         }
 
         match &mut self.mode {
-            Mode::Insert(editor) => edit_line(&mut editor.text, &mut editor.cursor, &key),
+            Mode::Insert(editor) => {
+                if edit_line(&mut editor.text, &mut editor.cursor, &key) {
+                    self.reveal_focus = true;
+                }
+            }
             Mode::Command(command) => {
                 edit_line(&mut command.text, &mut command.cursor, &key);
             }
@@ -873,21 +923,24 @@ impl App {
     }
 }
 
-fn edit_line(text: &mut String, cursor: &mut usize, key: &KeyEvent) {
+fn edit_line(text: &mut String, cursor: &mut usize, key: &KeyEvent) -> bool {
     match key.code {
         KeyCode::Char(character) => {
             text.insert(*cursor, character);
             let insertion_end = *cursor + character.len_utf8();
             *cursor = boundary_at_or_after(text, insertion_end);
+            true
         }
         KeyCode::Backspace if *cursor > 0 => {
             let previous = previous_boundary(text, *cursor);
             text.drain(previous..*cursor);
             *cursor = previous;
+            true
         }
         KeyCode::Delete if *cursor < text.len() => {
             let next = next_boundary(text, *cursor);
             text.drain(*cursor..next);
+            true
         }
         KeyCode::Left
             if key
@@ -895,6 +948,7 @@ fn edit_line(text: &mut String, cursor: &mut usize, key: &KeyEvent) {
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
         {
             *cursor = previous_word_boundary(text, *cursor);
+            false
         }
         KeyCode::Right
             if key
@@ -902,12 +956,25 @@ fn edit_line(text: &mut String, cursor: &mut usize, key: &KeyEvent) {
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
         {
             *cursor = next_word_boundary(text, *cursor);
+            false
         }
-        KeyCode::Left => *cursor = previous_boundary(text, *cursor),
-        KeyCode::Right => *cursor = next_boundary(text, *cursor),
-        KeyCode::Home => *cursor = 0,
-        KeyCode::End => *cursor = text.len(),
-        _ => {}
+        KeyCode::Left => {
+            *cursor = previous_boundary(text, *cursor);
+            false
+        }
+        KeyCode::Right => {
+            *cursor = next_boundary(text, *cursor);
+            false
+        }
+        KeyCode::Home => {
+            *cursor = 0;
+            false
+        }
+        KeyCode::End => {
+            *cursor = text.len();
+            false
+        }
+        _ => false,
     }
 }
 
@@ -1223,22 +1290,14 @@ fn row_has_focus(
         DisplayRow::Empty => false,
     }
 }
-fn viewport_start(
-    rows: &[DisplayRowLayout<'_>],
-    height: u16,
-    focus: Option<&Focus>,
-    editor: Option<&Editor>,
-) -> usize {
-    let Some(focused) = rows
-        .iter()
-        .position(|layout| row_has_focus(layout, focus, editor))
-    else {
+fn maximum_viewport_start(rows: &[DisplayRowLayout<'_>], height: u16) -> usize {
+    if rows.is_empty() || height == 0 {
         return 0;
-    };
+    }
 
     let height = usize::from(height);
-    let mut start = focused;
-    let mut occupied = rows[focused].visual_height();
+    let mut start = rows.len() - 1;
+    let mut occupied = rows[start].visual_height();
     while start > 0 {
         let preceding_height = rows[start - 1].visual_height();
         if occupied.saturating_add(preceding_height) > height {
@@ -1250,6 +1309,41 @@ fn viewport_start(
     start
 }
 
+fn reconcile_viewport_start(
+    rows: &[DisplayRowLayout<'_>],
+    height: u16,
+    viewport_start: usize,
+    reveal_focus: bool,
+    focus: Option<&Focus>,
+    editor: Option<&Editor>,
+) -> usize {
+    let maximum = maximum_viewport_start(rows, height);
+    let mut start = viewport_start.min(maximum);
+    if !reveal_focus || height == 0 {
+        return start;
+    }
+    let Some(focused) = rows
+        .iter()
+        .position(|layout| row_has_focus(layout, focus, editor))
+    else {
+        return start;
+    };
+
+    let height = usize::from(height);
+    if focused < start || rows[focused].visual_height() > height {
+        return focused.min(maximum);
+    }
+
+    let mut occupied = rows[start..=focused].iter().fold(0usize, |total, layout| {
+        total.saturating_add(layout.visual_height())
+    });
+    while occupied > height && start < focused {
+        occupied = occupied.saturating_sub(rows[start].visual_height());
+        start += 1;
+    }
+    start.min(maximum)
+}
+
 fn render_branch_sections(
     frame: &mut Frame,
     area: Rect,
@@ -1258,6 +1352,7 @@ fn render_branch_sections(
     focus: Option<&Focus>,
     hovered: Option<&Focus>,
     editor: Option<&Editor>,
+    viewport_start: usize,
     theme: &Theme,
 ) {
     frame.render_widget(
@@ -1280,7 +1375,7 @@ fn render_branch_sections(
     }
 
     let rows = layout_display_rows(display_rows(sections, todos, editor), area.width);
-    let first = viewport_start(&rows, area.height, focus, editor);
+    let first = viewport_start.min(maximum_viewport_start(&rows, area.height));
     let mut rendered_y = 0usize;
 
     for layout in rows.iter().skip(first) {
@@ -1406,10 +1501,10 @@ fn render_branch_header(
         " BRANCH "
     } else {
         match (section.is_current, section.is_locked) {
-            (true, true) => " CURRENT · LOCKED ",
-            (true, false) => " CURRENT ",
-            (false, true) => " WORKTREE · LOCKED ",
-            (false, false) => " WORKTREE ",
+            (true, true) => " CURRENT · LOCKED",
+            (true, false) => " CURRENT",
+            (false, true) => " WORKTREE · LOCKED",
+            (false, false) => " WORKTREE",
         }
     };
     let tag_width = UnicodeWidthStr::width(tag);
@@ -1564,6 +1659,8 @@ mod tests {
             error: None,
             pointer_position: None,
             frame_area: Rect::default(),
+            viewport_start: 0,
+            reveal_focus: true,
         }
     }
 
@@ -2671,6 +2768,163 @@ mod tests {
             app.focus,
             Some(Focus::Branch("refs/heads/topic".to_owned()))
         );
+    }
+
+    #[test]
+    fn keyboard_target_already_visible_does_not_scroll() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .unwrap();
+        app.reload();
+        let backend = TestBackend::new(40, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Down));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert_eq!(app.focus, Some(Focus::Todo(app.todos[1].id)));
+        assert!(row_text(&terminal, 2).contains("main"));
+        assert!(row_text(&terminal, 3).contains("first"));
+        assert!(row_text(&terminal, 4).contains("second"));
+    }
+
+    #[test]
+    fn keyboard_boundary_crossing_scrolls_minimally_without_snapping_on_reverse() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let wrapped = app
+            .store
+            .insert_todo("refs/heads/main", "one two three", None)
+            .unwrap();
+        let trailing = app
+            .store
+            .insert_todo("refs/heads/main", "trailing", Some(wrapped.id))
+            .unwrap();
+        app.reload();
+        let backend = TestBackend::new(20, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        app.handle_key_event(key(KeyCode::Down));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 2).contains("main"));
+        assert!(row_text(&terminal, 3).contains("one two"));
+        assert!(row_text(&terminal, 4).contains("three"));
+
+        app.handle_key_event(key(KeyCode::Down));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.focus, Some(Focus::Todo(trailing.id)));
+        assert!(row_text(&terminal, 2).contains("one two"));
+        assert!(row_text(&terminal, 3).contains("three"));
+        assert!(row_text(&terminal, 4).contains("trailing"));
+
+        app.handle_key_event(key(KeyCode::Up));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.focus, Some(Focus::Todo(wrapped.id)));
+        assert!(row_text(&terminal, 2).contains("one two"));
+        assert!(row_text(&terminal, 3).contains("three"));
+        assert!(row_text(&terminal, 4).contains("trailing"));
+    }
+
+    #[test]
+    fn wheel_events_scroll_inside_viewport_one_row_and_preserve_focus() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        let second = app
+            .store
+            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "third", Some(second.id))
+            .unwrap();
+        app.reload();
+        let original_focus = app.focus.clone();
+        let backend = TestBackend::new(40, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollDown, 2, 2));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.focus, original_focus);
+        assert!(row_text(&terminal, 2).contains("first"));
+        assert!(row_text(&terminal, 4).contains("third"));
+
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollUp, 2, 2));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.focus, original_focus);
+        assert!(row_text(&terminal, 2).contains("main"));
+        assert!(row_text(&terminal, 4).contains("second"));
+    }
+
+    #[test]
+    fn wheel_outside_todo_viewport_is_a_no_op() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        let second = app
+            .store
+            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .unwrap();
+        let third = app
+            .store
+            .insert_todo("refs/heads/main", "third", Some(second.id))
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "fourth", Some(third.id))
+            .unwrap();
+        app.reload();
+        let backend = TestBackend::new(40, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollDown, 2, 2));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 2).contains("first"));
+
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollDown, 0, 2));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 2).contains("first"));
+
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollUp, 0, 2));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 2).contains("first"));
+    }
+
+    #[test]
+    fn click_hit_testing_follows_manual_scroll() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let first = app
+            .store
+            .insert_todo("refs/heads/main", "first", None)
+            .unwrap();
+        let second = app
+            .store
+            .insert_todo("refs/heads/main", "second", Some(first.id))
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "third", Some(second.id))
+            .unwrap();
+        app.reload();
+        let backend = TestBackend::new(40, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollDown, 2, 2));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 2).contains("first"));
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+        assert_eq!(app.focus, Some(Focus::Todo(first.id)));
     }
 
     #[test]
