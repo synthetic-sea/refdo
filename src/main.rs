@@ -32,6 +32,7 @@ enum Mode {
     Normal,
     Insert(Editor),
     Command(CommandLine),
+    ConfirmClear(ClearConfirmation),
 }
 
 impl Mode {
@@ -40,13 +41,14 @@ impl Mode {
             Self::Normal => " NORMAL ",
             Self::Insert(_) => " INSERT ",
             Self::Command(_) => " COMMAND ",
+            Self::ConfirmClear(_) => " CONFIRM ",
         }
     }
 
     const fn editor(&self) -> Option<&Editor> {
         match self {
             Self::Insert(editor) => Some(editor),
-            Self::Normal | Self::Command(_) => None,
+            Self::Normal | Self::Command(_) | Self::ConfirmClear(_) => None,
         }
     }
 }
@@ -81,6 +83,11 @@ struct CommandLine {
     target_branch: Option<String>,
     text: String,
     cursor: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ClearConfirmation {
+    target_branch: String,
 }
 
 struct App {
@@ -671,6 +678,44 @@ impl App {
         self.error = None;
     }
 
+    fn begin_clear_confirmation(&mut self, target_branch: String) {
+        let display_name = self
+            .repository
+            .sections
+            .iter()
+            .find(|section| section.full_ref_name == target_branch)
+            .map(|section| section.display_name.as_str())
+            .unwrap_or(&target_branch);
+        self.error = Some(format!(
+            "clear: remove all items from {display_name}? [y/N]"
+        ));
+        self.mode = Mode::ConfirmClear(ClearConfirmation { target_branch });
+    }
+
+    fn discard_clear_confirmation(&mut self) {
+        self.mode = Mode::Normal;
+        self.error = None;
+    }
+
+    fn confirm_clear(&mut self) {
+        let Mode::ConfirmClear(confirmation) = &self.mode else {
+            return;
+        };
+        let target_branch = confirmation.target_branch.clone();
+        self.mode = Mode::Normal;
+
+        match self.store.delete_all_todos(&target_branch) {
+            Ok(count) => {
+                if !self.reload() {
+                    return;
+                }
+                self.focus = Some(Focus::Branch(target_branch));
+                self.error = Some(format!("clear: removed {count} items"));
+            }
+            Err(error) => self.error = Some(format!("clear: {error}")),
+        }
+    }
+
     fn execute_command_line(&mut self) {
         let Mode::Command(command) = &self.mode else {
             return;
@@ -683,7 +728,7 @@ impl App {
             self.error = None;
             return;
         }
-        if name != "prune" && name != "sort" {
+        if name != "prune" && name != "sort" && name != "clear" {
             self.error = Some(format!("Unknown command: {name}"));
             return;
         }
@@ -695,6 +740,10 @@ impl App {
             self.error = Some(format!("{name}: no focused branch"));
             return;
         };
+        if name == "clear" {
+            self.begin_clear_confirmation(target_branch);
+            return;
+        }
 
         let previous_focus = self.focus.clone();
         let result = match name.as_str() {
@@ -781,6 +830,21 @@ impl App {
                 }
                 _ => {}
             },
+            Mode::ConfirmClear(_) => {
+                match key.code {
+                    KeyCode::Char('y' | 'Y')
+                        if key.modifiers == KeyModifiers::NONE
+                            || key.modifiers == KeyModifiers::SHIFT =>
+                    {
+                        self.confirm_clear();
+                    }
+                    KeyCode::Char('n' | 'N') | KeyCode::Enter | KeyCode::Esc => {
+                        self.discard_clear_confirmation();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             Mode::Insert(_) => match key.code {
                 KeyCode::Enter => {
                     self.commit_editor();
@@ -799,7 +863,7 @@ impl App {
             Mode::Command(command) => {
                 edit_line(&mut command.text, &mut command.cursor, &key);
             }
-            Mode::Normal => {}
+            Mode::Normal | Mode::ConfirmClear(_) => {}
         }
     }
 }
@@ -3017,6 +3081,113 @@ mod tests {
             branch_titles(&app, "refs/heads/main"),
             vec![("cut sentinel".to_owned(), false)]
         );
+    }
+
+    #[test]
+    fn clear_requires_confirmation_and_enter_cancels_without_deleting() {
+        let mut app = app_with_sections(vec![section("main")]);
+        let completed = app
+            .store
+            .insert_todo("refs/heads/main", "completed", None)
+            .unwrap();
+        app.store
+            .insert_todo("refs/heads/main", "incomplete", Some(completed.id))
+            .unwrap();
+        app.store.toggle_todo(completed.id).unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(completed.id));
+        let before = app.todos.clone();
+
+        run_command(&mut app, "clear");
+
+        assert!(matches!(
+            &app.mode,
+            Mode::ConfirmClear(ClearConfirmation { target_branch })
+                if target_branch == "refs/heads/main"
+        ));
+        assert_eq!(app.todos, before);
+        assert_eq!(app.store.load_all().unwrap(), before);
+        let backend = TestBackend::new(60, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let footer = row_text(&terminal, 5);
+        assert!(footer.contains("CONFIRM"));
+        assert!(footer.contains("clear: remove all items from main? [y/N]"));
+
+        app.handle_key_event(modified_key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert!(matches!(&app.mode, Mode::ConfirmClear(_)));
+        app.handle_key_event(key(KeyCode::Enter));
+
+        assert!(matches!(&app.mode, Mode::Normal));
+        assert_eq!(app.error, None);
+        assert_eq!(app.todos, before);
+        assert_eq!(app.store.load_all().unwrap(), before);
+        assert_eq!(app.focus, Some(Focus::Todo(completed.id)));
+    }
+
+    #[test]
+    fn clear_confirmation_deletes_every_target_branch_todo_and_persists() {
+        let mut app = app_with_sections(vec![section("main"), section("feature")]);
+        let main_completed = app
+            .store
+            .insert_todo_with_completion("refs/heads/main", "main completed", true, None)
+            .unwrap();
+        app.store
+            .insert_todo(
+                "refs/heads/main",
+                "main incomplete",
+                Some(main_completed.id),
+            )
+            .unwrap();
+        let feature = app
+            .store
+            .insert_todo_with_completion("refs/heads/feature", "feature completed", true, None)
+            .unwrap();
+        app.reload();
+        app.focus = Some(Focus::Todo(main_completed.id));
+        app.cut_buffer = Some(main_completed.clone());
+
+        run_command(&mut app, "clear");
+        app.handle_key_event(key(KeyCode::Char('y')));
+
+        assert!(branch_titles(&app, "refs/heads/main").is_empty());
+        assert_eq!(
+            branch_titles(&app, "refs/heads/feature"),
+            vec![("feature completed".to_owned(), true)]
+        );
+        assert_eq!(app.store.load_all().unwrap(), app.todos);
+        assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
+        assert_eq!(
+            app.cut_buffer.as_ref().map(|todo| todo.id),
+            Some(main_completed.id)
+        );
+        assert_eq!(app.error.as_deref(), Some("clear: removed 2 items"));
+        assert!(matches!(&app.mode, Mode::Normal));
+        assert!(app.todos.iter().any(|todo| todo.id == feature.id));
+    }
+
+    #[test]
+    fn clear_without_focus_or_persistence_never_prompts_or_deletes() {
+        let mut app = app_with_sections(vec![section("main")]);
+        app.store
+            .insert_todo("refs/heads/main", "must remain", None)
+            .unwrap();
+        app.reload();
+        app.focus = None;
+
+        run_command(&mut app, "clear");
+
+        assert_eq!(app.error.as_deref(), Some("clear: no focused branch"));
+        assert_eq!(app.store.load_all().unwrap().len(), 1);
+        assert!(matches!(&app.mode, Mode::Normal));
+
+        app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+        app.persistence_available = false;
+        run_command(&mut app, "clear");
+
+        assert_eq!(app.error.as_deref(), Some("clear: persistence unavailable"));
+        assert_eq!(app.store.load_all().unwrap().len(), 1);
+        assert!(matches!(&app.mode, Mode::Normal));
     }
     #[test]
     fn sort_orders_only_target_branch_persists_and_preserves_todo_focus_and_cut_buffer() {
