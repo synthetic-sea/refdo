@@ -88,6 +88,25 @@ When confirmation is shown, press `y` or `Y` to confirm. Press `n`, `N`, `Enter`
 
 In normal mode, click a row to select it. Use the mouse wheel over the todo list to scroll.
 
+## Configuration
+
+On first startup, refdo creates `config.toml` in the platform-standard configuration directory:
+
+- Linux: `$XDG_CONFIG_HOME/refdo/config.toml`, or `~/.config/refdo/config.toml` when `XDG_CONFIG_HOME` is unset
+- macOS: `~/.config/refdo/config.toml`
+- Windows: `%APPDATA%\refdo\config.toml`
+
+Theme selection is configured with:
+
+```toml
+[theme]
+light = "tokyo-night-day"
+dark = "tokyo-night"
+mode = "system"
+```
+
+`light` and `dark` select the built-in themes used for each appearance. `mode` accepts `light`, `dark`, or `system`; `system` follows the operating system preference and falls back to the light theme when no preference can be detected.
+
 ## Storage
 
 refdo stores its database at `<git-common-dir>/refdo/data.db`. The database is shared by the repository's worktrees, while each listed branch has its own todos. Because it lives in Git's common directory rather than the working tree, the database is not committed to Git.

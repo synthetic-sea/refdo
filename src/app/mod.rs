@@ -301,6 +301,6 @@ impl App {
 #[cfg(test)]
 mod tests;
 
-pub(crate) fn run() -> std::io::Result<()> {
-    ratatui::run(|terminal| App::default().run(terminal))
+pub(crate) fn run(theme: Theme) -> std::io::Result<()> {
+    ratatui::run(|terminal| App::new(theme).run(terminal))
 }
