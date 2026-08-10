@@ -683,7 +683,7 @@ impl App {
             self.error = None;
             return;
         }
-        if name != "clean" && name != "sort" {
+        if name != "prune" && name != "sort" {
             self.error = Some(format!("Unknown command: {name}"));
             return;
         }
@@ -698,10 +698,10 @@ impl App {
 
         let previous_focus = self.focus.clone();
         let result = match name.as_str() {
-            "clean" => self
+            "prune" => self
                 .store
                 .delete_completed_todos(&target_branch)
-                .map(|count| format!("clean: removed {count} completed items")),
+                .map(|count| format!("prune: removed {count} completed items")),
             "sort" => self
                 .store
                 .sort_todos(&target_branch)
@@ -2821,10 +2821,10 @@ mod tests {
             Position::new(1, 5)
         );
 
-        type_text(&mut app, "clean");
-        assert_eq!(command_line(&app).text, "clean");
+        type_text(&mut app, "prune");
+        assert_eq!(command_line(&app).text, "prune");
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(row_text(&terminal, 5).starts_with(":clean"));
+        assert!(row_text(&terminal, 5).starts_with(":prune"));
         assert!(!row_text(&terminal, 5).contains("COMMAND"));
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
@@ -2875,6 +2875,15 @@ mod tests {
     }
 
     #[test]
+    fn clean_is_rejected_after_prune_rename() {
+        let mut app = app_with_sections(vec![section("main")]);
+
+        run_command(&mut app, "clean");
+
+        assert_eq!(app.error.as_deref(), Some("Unknown command: clean"));
+    }
+
+    #[test]
     fn command_target_resolves_from_headers_and_todos_when_opened() {
         let mut app = app_with_sections(vec![section("main"), section("feature")]);
         let todo = app
@@ -2900,7 +2909,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_deletes_only_completed_target_branch_todos_and_persists() {
+    fn prune_deletes_only_completed_target_branch_todos_and_persists() {
         let mut app = app_with_sections(vec![section("main"), section("feature")]);
         let completed = app
             .store
@@ -2920,7 +2929,7 @@ mod tests {
         app.focus = Some(Focus::Todo(active.id));
         app.cut_buffer = Some(active.clone());
 
-        run_command(&mut app, " clean ");
+        run_command(&mut app, " prune ");
 
         assert_eq!(
             branch_titles(&app, "refs/heads/main"),
@@ -2935,12 +2944,12 @@ mod tests {
         assert_eq!(app.cut_buffer.as_ref().map(|todo| todo.id), Some(active.id));
         assert_eq!(
             app.error.as_deref(),
-            Some("clean: removed 1 completed items")
+            Some("prune: removed 1 completed items")
         );
     }
 
     #[test]
-    fn clean_reports_zero_matches_without_changing_state() {
+    fn prune_reports_zero_matches_without_changing_state() {
         let mut app = app_with_sections(vec![section("main")]);
         let active = app
             .store
@@ -2950,19 +2959,19 @@ mod tests {
         app.focus = Some(Focus::Todo(active.id));
         let before = app.todos.clone();
 
-        run_command(&mut app, "clean");
+        run_command(&mut app, "prune");
 
         assert_eq!(app.todos, before);
         assert_eq!(app.store.load_all().unwrap(), before);
         assert_eq!(app.focus, Some(Focus::Todo(active.id)));
         assert_eq!(
             app.error.as_deref(),
-            Some("clean: removed 0 completed items")
+            Some("prune: removed 0 completed items")
         );
     }
 
     #[test]
-    fn clean_without_focus_or_persistence_fails_without_deleting() {
+    fn prune_without_focus_or_persistence_fails_without_deleting() {
         let mut app = app_with_sections(vec![section("main")]);
         let completed = app
             .store
@@ -2971,21 +2980,21 @@ mod tests {
         app.store.toggle_todo(completed.id).unwrap();
         app.reload();
         app.focus = None;
-        run_command(&mut app, "clean");
-        assert_eq!(app.error.as_deref(), Some("clean: no focused branch"));
+        run_command(&mut app, "prune");
+        assert_eq!(app.error.as_deref(), Some("prune: no focused branch"));
         assert_eq!(app.store.load_all().unwrap().len(), 1);
         assert!(matches!(&app.mode, Mode::Normal));
 
         app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
         app.persistence_available = false;
-        run_command(&mut app, "clean");
-        assert_eq!(app.error.as_deref(), Some("clean: persistence unavailable"));
+        run_command(&mut app, "prune");
+        assert_eq!(app.error.as_deref(), Some("prune: persistence unavailable"));
         assert_eq!(app.store.load_all().unwrap().len(), 1);
         assert!(matches!(&app.mode, Mode::Normal));
     }
 
     #[test]
-    fn clean_repairs_deleted_todo_focus_to_target_header_and_keeps_cut_buffer() {
+    fn prune_repairs_deleted_todo_focus_to_target_header_and_keeps_cut_buffer() {
         let mut app = app_with_sections(vec![section("main")]);
         let completed = app
             .store
@@ -3000,7 +3009,7 @@ mod tests {
         app.focus = Some(Focus::Todo(completed.id));
         app.cut_buffer = Some(cut.clone());
 
-        run_command(&mut app, "clean");
+        run_command(&mut app, "prune");
 
         assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
         assert_eq!(app.cut_buffer.as_ref().map(|todo| todo.id), Some(cut.id));
