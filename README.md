@@ -87,7 +87,7 @@ When confirmation is shown, press `y` or `Y` to confirm. Press `n`, `N`, `Enter`
 
 ### Mouse
 
-In normal mode, click a row to select it. Use the mouse wheel over the todo list to scroll.
+In normal mode, click a row to select it, or double-click a todo's text to edit it with the cursor at the clicked location. Use the mouse wheel over the todo list to scroll.
 
 ## Configuration
 

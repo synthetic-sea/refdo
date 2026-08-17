@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::super::{Editor, EditorTarget, Focus};
 use crate::repository::BranchSection;
-use crate::storage::Todo;
+use crate::storage::{Todo, TodoId};
 pub(in crate::app) fn app_areas(area: Rect) -> [Rect; 3] {
     Layout::vertical([
         Constraint::Length(1),
@@ -238,12 +238,12 @@ pub(in crate::app) fn maximum_viewport_start(rows: &[DisplayRowLayout<'_>], heig
     }
     start
 }
-pub(in crate::app) fn hit_test_display_rows(
-    rows: &[DisplayRowLayout<'_>],
+fn hit_test_display_row<'layout, 'row>(
+    rows: &'row [DisplayRowLayout<'layout>],
     area: Rect,
     viewport_start: usize,
     position: Position,
-) -> Option<Focus> {
+) -> Option<(&'row DisplayRowLayout<'layout>, usize)> {
     if !area.contains(position) {
         return None;
     }
@@ -258,15 +258,62 @@ pub(in crate::app) fn hit_test_display_rows(
             .visual_height()
             .min(usize::from(area.height) - rendered_y);
         if target_y < rendered_y + rendered_height {
-            return match &layout.row {
-                DisplayRow::Header(section) => Some(Focus::Branch(section.full_ref_name.clone())),
-                DisplayRow::Todo(todo) => Some(Focus::Todo(todo.id)),
-                DisplayRow::Editor { .. } | DisplayRow::Empty => None,
-            };
+            return Some((layout, target_y - rendered_y));
         }
         rendered_y += rendered_height;
     }
     None
+}
+
+fn title_cursor_at_column(title: &str, range: &Range<usize>, column: usize) -> Option<usize> {
+    let line = &title[range.clone()];
+    if column > UnicodeWidthStr::width(line) {
+        return None;
+    }
+
+    let mut used_width = 0;
+    for (offset, grapheme) in line.grapheme_indices(true) {
+        let next_width = used_width + UnicodeWidthStr::width(grapheme);
+        if column < next_width {
+            return Some(range.start + offset);
+        }
+        used_width = next_width;
+    }
+    Some(range.end)
+}
+
+pub(in crate::app) fn hit_test_display_rows(
+    rows: &[DisplayRowLayout<'_>],
+    area: Rect,
+    viewport_start: usize,
+    position: Position,
+) -> Option<Focus> {
+    let (layout, _) = hit_test_display_row(rows, area, viewport_start, position)?;
+    match &layout.row {
+        DisplayRow::Header(section) => Some(Focus::Branch(section.full_ref_name.clone())),
+        DisplayRow::Todo(todo) => Some(Focus::Todo(todo.id)),
+        DisplayRow::Editor { .. } | DisplayRow::Empty => None,
+    }
+}
+
+pub(in crate::app) fn hit_test_todo_text(
+    rows: &[DisplayRowLayout<'_>],
+    area: Rect,
+    viewport_start: usize,
+    position: Position,
+) -> Option<(TodoId, usize)> {
+    let title_x = area.x.saturating_add(TODO_PREFIX_WIDTH);
+    if position.x < title_x {
+        return None;
+    }
+    let (layout, visual_line) = hit_test_display_row(rows, area, viewport_start, position)?;
+    let DisplayRow::Todo(todo) = &layout.row else {
+        return None;
+    };
+    let range = layout.title_ranges.get(visual_line)?;
+    let column = usize::from(position.x - title_x);
+    let cursor = title_cursor_at_column(&todo.title, range, column)?;
+    Some((todo.id, cursor))
 }
 
 pub(in crate::app) fn reconcile_viewport_start(

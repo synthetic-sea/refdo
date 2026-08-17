@@ -1,4 +1,7 @@
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 use ratatui::{
     crossterm::event::{
@@ -8,7 +11,7 @@ use ratatui::{
     layout::Position,
 };
 
-use super::{App, Mode, PendingOperator, text_input, ui};
+use super::{App, DOUBLE_CLICK_INTERVAL, Mode, PendingOperator, TodoClick, text_input, ui};
 
 impl App {
     pub(in crate::app) fn handle_events(&mut self) -> io::Result<()> {
@@ -32,6 +35,7 @@ impl App {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
         ) && ui::todo_viewport_area(self.frame_area).contains(position)
         {
+            self.last_todo_click = None;
             let area = ui::todo_viewport_area(self.frame_area);
             let rows = ui::build_display_layout(
                 &self.repository.sections,
@@ -50,21 +54,39 @@ impl App {
         } else if matches!(&self.mode, Mode::Normal)
             && mouse_event.kind == MouseEventKind::Down(MouseButton::Left)
         {
-            let focus = {
-                let area = ui::todo_viewport_area(self.frame_area);
-                if area.contains(position) {
-                    let rows = ui::build_display_layout(
-                        &self.repository.sections,
-                        &self.todos,
-                        self.mode.editor(),
-                        area.width,
-                    );
-                    ui::hit_test_display_rows(&rows, area, self.viewport_start, position)
-                } else {
-                    None
-                }
+            let area = ui::todo_viewport_area(self.frame_area);
+            let (focus, todo_text_hit) = if area.contains(position) {
+                let rows = ui::build_display_layout(
+                    &self.repository.sections,
+                    &self.todos,
+                    self.mode.editor(),
+                    area.width,
+                );
+                (
+                    ui::hit_test_display_rows(&rows, area, self.viewport_start, position),
+                    ui::hit_test_todo_text(&rows, area, self.viewport_start, position),
+                )
+            } else {
+                (None, None)
             };
             self.focus = focus;
+
+            if let Some((id, cursor)) = todo_text_hit {
+                let now = Instant::now();
+                let is_double_click = self.last_todo_click.take().is_some_and(|previous| {
+                    previous.id == id
+                        && now.saturating_duration_since(previous.at) <= DOUBLE_CLICK_INTERVAL
+                });
+                if is_double_click {
+                    self.open_update_editor(Some(cursor));
+                } else {
+                    self.last_todo_click = Some(TodoClick { id, at: now });
+                }
+            } else {
+                self.last_todo_click = None;
+            }
+        } else if matches!(mouse_event.kind, MouseEventKind::Down(_)) {
+            self.last_todo_click = None;
         }
     }
 
@@ -96,7 +118,7 @@ impl App {
             KeyCode::Char('[') => self.move_section_focus(false),
             KeyCode::Char('o') => self.open_create_editor(),
             KeyCode::Char(':') => self.open_command_line(),
-            KeyCode::Char('i') => self.open_update_editor(),
+            KeyCode::Char('i') => self.open_update_editor(None),
             KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
             KeyCode::Char('p') => self.paste_registered_todo(true),
             KeyCode::Char('P') => self.paste_registered_todo(false),
@@ -110,6 +132,7 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        self.last_todo_click = None;
         match &self.mode {
             Mode::Normal => {
                 self.handle_normal_key(key.code);

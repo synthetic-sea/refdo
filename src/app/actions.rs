@@ -42,7 +42,7 @@ impl App {
         self.error = None;
     }
 
-    pub(in crate::app) fn open_update_editor(&mut self) {
+    pub(in crate::app) fn open_update_editor(&mut self, cursor: Option<usize>) {
         if !self.persistence_available {
             return;
         }
@@ -53,10 +53,13 @@ impl App {
         let Some(todo) = self.todos.iter().find(|todo| todo.id == *id) else {
             return;
         };
+        let cursor = cursor
+            .filter(|cursor| todo.title.is_char_boundary(*cursor))
+            .unwrap_or(todo.title.len());
         self.mode = Mode::Insert(Editor {
             target: EditorTarget::Update { id: *id },
             text: todo.title.clone(),
-            cursor: todo.title.len(),
+            cursor,
         });
         self.reveal_focus = true;
         self.error = None;

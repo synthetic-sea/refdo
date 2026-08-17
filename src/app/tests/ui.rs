@@ -101,6 +101,81 @@ fn normal_left_click_selects_the_rendered_row() {
 }
 
 #[test]
+fn double_clicking_todo_text_edits_at_the_clicked_unicode_cell() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo("refs/heads/main", "ab界cd", None)
+        .unwrap();
+    app.reload();
+    let backend = TestBackend::new(40, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    for _ in 0..2 {
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 11, 3));
+    }
+
+    let Mode::Insert(editor) = &app.mode else {
+        panic!("double click should enter insert mode");
+    };
+    assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+    assert_eq!(editor.cursor, "ab界".len());
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert_eq!(
+        terminal.backend_mut().get_cursor_position().unwrap(),
+        Position::new(11, 3)
+    );
+}
+
+#[test]
+fn double_clicking_wrapped_todo_text_uses_the_clicked_visual_line() {
+    let mut app = app_with_sections(vec![section("main")]);
+    app.store
+        .insert_todo("refs/heads/main", "alpha beta gamma delta", None)
+        .unwrap();
+    app.reload();
+    let backend = TestBackend::new(26, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(row_text(&terminal, 4).contains("delta"));
+
+    for _ in 0..2 {
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 9, 4));
+    }
+
+    let Mode::Insert(editor) = &app.mode else {
+        panic!("double click should enter insert mode");
+    };
+    assert_eq!(editor.cursor, "alpha beta gamma de".len());
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert_eq!(
+        terminal.backend_mut().get_cursor_position().unwrap(),
+        Position::new(9, 4)
+    );
+}
+
+#[test]
+fn double_clicking_todo_marker_only_selects_the_todo() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo("refs/heads/main", "select me", None)
+        .unwrap();
+    app.reload();
+    let backend = TestBackend::new(40, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    for _ in 0..2 {
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 5, 3));
+    }
+
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+}
+
+#[test]
 fn insert_mode_click_does_not_change_focus() {
     let mut app = app_with_sections(vec![section("main"), section("topic")]);
     app.handle_key_event(key(KeyCode::Char('o')));

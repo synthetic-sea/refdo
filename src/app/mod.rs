@@ -29,6 +29,7 @@ use crate::storage::{Todo, TodoId, TodoStore};
 use crate::theme::{TOKYO_NIGHT_DAY, Theme};
 
 const SYSTEM_THEME_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const UNKNOWN_DATA_VERSION: i64 = -1;
 
 #[derive(Clone, Debug)]
@@ -106,6 +107,12 @@ enum PendingOperator {
     Yank,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TodoClick {
+    id: TodoId,
+    at: Instant,
+}
+
 struct App {
     exit: bool,
     repository: RepositoryContext,
@@ -122,6 +129,7 @@ struct App {
     error: Option<String>,
     clipboard_request: Option<String>,
     pointer_position: Option<Position>,
+    last_todo_click: Option<TodoClick>,
     frame_area: Rect,
     viewport_start: usize,
     reveal_focus: bool,
@@ -187,6 +195,7 @@ impl App {
             error,
             clipboard_request: None,
             pointer_position: None,
+            last_todo_click: None,
             frame_area: Rect::default(),
             viewport_start: 0,
             reveal_focus: true,

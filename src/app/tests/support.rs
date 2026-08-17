@@ -49,6 +49,7 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
         error: None,
         clipboard_request: None,
         pointer_position: None,
+        last_todo_click: None,
         frame_area: Rect::default(),
         viewport_start: 0,
         reveal_focus: true,
