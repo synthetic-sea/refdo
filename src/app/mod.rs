@@ -10,6 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crossterm::clipboard::CopyToClipboard;
+
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::{
@@ -112,6 +114,7 @@ struct App {
     system_theme: Option<SystemThemeState>,
     data_version: i64,
     error: Option<String>,
+    clipboard_request: Option<String>,
     pointer_position: Option<Position>,
     frame_area: Rect,
     viewport_start: usize,
@@ -176,6 +179,7 @@ impl App {
             system_theme: None,
             data_version,
             error,
+            clipboard_request: None,
             pointer_position: None,
             frame_area: Rect::default(),
             viewport_start: 0,
@@ -234,6 +238,18 @@ impl App {
         };
     }
 
+    fn flush_clipboard_request(&mut self, writer: &mut impl io::Write) {
+        let Some(text) = self.clipboard_request.take() else {
+            return;
+        };
+        self.error = Some(
+            match execute!(writer, CopyToClipboard::to_clipboard_from(text)) {
+                Ok(()) => "Copied todo text".to_owned(),
+                Err(error) => format!("copy: {error}"),
+            },
+        );
+    }
+
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         if let Err(error) = execute!(terminal.backend_mut(), EnableMouseCapture) {
             let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
@@ -244,6 +260,7 @@ impl App {
             while !self.exit {
                 terminal.draw(|frame| self.draw(frame))?;
                 self.handle_events()?;
+                self.flush_clipboard_request(terminal.backend_mut());
             }
             Ok(())
         })();

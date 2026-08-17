@@ -48,6 +48,7 @@ Always launch refdo from within the Git repository or worktree whose todos you w
 | `o` | Create a todo at the start of the selected branch, or after the selected todo. `Enter` saves it and remains in create mode for rapid entry. |
 | `i` | Edit the selected todo. |
 | `x` / `Space` | Toggle the selected todo between incomplete and complete. |
+| `y` | Copy the selected todo text to the system clipboard. |
 | `dd` | Cut the selected todo into an in-session buffer. The todo is deleted until it is pasted. |
 | `p` | Paste the cut todo below the selection; on a branch header, paste at the end of that branch. |
 | `P` | Paste the cut todo above the selection; on a branch header, paste at the start of that branch. |

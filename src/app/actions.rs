@@ -1,6 +1,16 @@
 use super::{App, Editor, EditorTarget, Focus, Mode};
 
 impl App {
+    pub(in crate::app) fn copy_focused_todo(&mut self) {
+        let Some(Focus::Todo(id)) = self.focus.as_ref() else {
+            return;
+        };
+        let Some(todo) = self.todos.iter().find(|todo| todo.id == *id) else {
+            return;
+        };
+        self.clipboard_request = Some(todo.title.clone());
+    }
+
     pub(in crate::app) fn open_create_editor(&mut self) {
         if !self.persistence_available {
             return;

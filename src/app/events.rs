@@ -88,6 +88,7 @@ impl App {
             KeyCode::Char('o') => self.open_create_editor(),
             KeyCode::Char(':') => self.open_command_line(),
             KeyCode::Char('i') => self.open_update_editor(),
+            KeyCode::Char('y') => self.copy_focused_todo(),
             KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
             KeyCode::Char('p') => self.paste_cut_todo(true),
             KeyCode::Char('P') => self.paste_cut_todo(false),

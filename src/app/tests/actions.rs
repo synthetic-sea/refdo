@@ -9,6 +9,91 @@ fn editor(app: &App) -> &Editor {
 }
 
 #[test]
+fn yank_queues_exact_unicode_title_without_mutating_todo_state() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo("refs/heads/main", "Ship 🚀 café", None)
+        .unwrap();
+    app.store.toggle_todo(todo.id).unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(todo.id));
+    app.cut_buffer = app.todos.first().cloned();
+    app.pending_cut = true;
+    let todos_before = app.todos.clone();
+    let stored_before = app.store.load_all().unwrap();
+    let focus_before = app.focus.clone();
+    let cut_buffer_before = app.cut_buffer.clone();
+
+    app.handle_key_event(key(KeyCode::Char('y')));
+
+    assert_eq!(app.clipboard_request.as_deref(), Some("Ship 🚀 café"));
+    assert_eq!(app.todos, todos_before);
+    assert_eq!(app.store.load_all().unwrap(), stored_before);
+    assert_eq!(app.focus, focus_before);
+    assert!(app.todos.first().unwrap().completed);
+    assert_eq!(app.cut_buffer, cut_buffer_before);
+    assert!(!app.pending_cut);
+}
+
+#[test]
+fn yank_without_todo_focus_queues_nothing() {
+    let mut app = app_with_sections(vec![section("main")]);
+
+    app.handle_key_event(key(KeyCode::Char('y')));
+    assert!(app.clipboard_request.is_none());
+
+    app.focus = None;
+    app.handle_key_event(key(KeyCode::Char('y')));
+    assert!(app.clipboard_request.is_none());
+}
+
+#[test]
+fn clipboard_flush_emits_and_consumes_osc52_request() {
+    let mut app = app_with_sections(vec![section("main")]);
+    app.clipboard_request = Some("Ship 🚀 café".to_owned());
+    let mut output = Vec::new();
+
+    app.flush_clipboard_request(&mut output);
+
+    assert!(app.clipboard_request.is_none());
+    assert!(!output.is_empty());
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("U2hpcCDwn5qAIGNhZsOp")
+    );
+    assert_eq!(app.error.as_deref(), Some("Copied todo text"));
+}
+
+#[test]
+fn clipboard_flush_consumes_request_and_reports_writer_failure() {
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("deliberate failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut app = app_with_sections(vec![section("main")]);
+    app.clipboard_request = Some("selected".to_owned());
+
+    app.flush_clipboard_request(&mut FailingWriter);
+
+    assert!(app.clipboard_request.is_none());
+    assert!(
+        app.error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("copy: "))
+    );
+}
+
+#[test]
 fn escape_clears_normal_mode_row_selection() {
     let mut app = app_with_sections(vec![section("main")]);
     let todo = app

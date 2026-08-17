@@ -47,6 +47,7 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
         system_theme: None,
         data_version: 0,
         error: None,
+        clipboard_request: None,
         pointer_position: None,
         frame_area: Rect::default(),
         viewport_start: 0,
