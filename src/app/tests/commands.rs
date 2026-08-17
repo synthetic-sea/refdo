@@ -138,7 +138,7 @@ fn prune_deletes_only_completed_target_branch_todos_and_persists() {
     app.store.toggle_todo(elsewhere.id).unwrap();
     app.reload();
     app.focus = Some(Focus::Todo(active.id));
-    app.cut_buffer = Some(active.clone());
+    app.todo_register = Some(active.clone());
 
     run_command(&mut app, " prune ");
 
@@ -152,7 +152,10 @@ fn prune_deletes_only_completed_target_branch_todos_and_persists() {
     );
     assert_eq!(app.store.load_all().unwrap(), app.todos);
     assert_eq!(app.focus, Some(Focus::Todo(active.id)));
-    assert_eq!(app.cut_buffer.as_ref().map(|todo| todo.id), Some(active.id));
+    assert_eq!(
+        app.todo_register.as_ref().map(|todo| todo.id),
+        Some(active.id)
+    );
     assert_eq!(
         app.error.as_deref(),
         Some("prune: removed 1 completed items")
@@ -205,28 +208,31 @@ fn prune_without_focus_or_persistence_fails_without_deleting() {
 }
 
 #[test]
-fn prune_repairs_deleted_todo_focus_to_target_header_and_keeps_cut_buffer() {
+fn prune_repairs_deleted_todo_focus_to_target_header_and_keeps_todo_register() {
     let mut app = app_with_sections(vec![section("main")]);
     let completed = app
         .store
         .insert_todo("refs/heads/main", "focused done", None)
         .unwrap();
-    let cut = app
+    let registered = app
         .store
-        .insert_todo("refs/heads/main", "cut sentinel", Some(completed.id))
+        .insert_todo("refs/heads/main", "register sentinel", Some(completed.id))
         .unwrap();
     app.store.toggle_todo(completed.id).unwrap();
     app.reload();
     app.focus = Some(Focus::Todo(completed.id));
-    app.cut_buffer = Some(cut.clone());
+    app.todo_register = Some(registered.clone());
 
     run_command(&mut app, "prune");
 
     assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
-    assert_eq!(app.cut_buffer.as_ref().map(|todo| todo.id), Some(cut.id));
+    assert_eq!(
+        app.todo_register.as_ref().map(|todo| todo.id),
+        Some(registered.id)
+    );
     assert_eq!(
         branch_titles(&app, "refs/heads/main"),
-        vec![("cut sentinel".to_owned(), false)]
+        vec![("register sentinel".to_owned(), false)]
     );
 }
 
@@ -292,7 +298,7 @@ fn clear_confirmation_deletes_every_target_branch_todo_and_persists() {
         .unwrap();
     app.reload();
     app.focus = Some(Focus::Todo(main_completed.id));
-    app.cut_buffer = Some(main_completed.clone());
+    app.todo_register = Some(main_completed.clone());
 
     run_command(&mut app, "clear");
     app.handle_key_event(key(KeyCode::Char('y')));
@@ -305,7 +311,7 @@ fn clear_confirmation_deletes_every_target_branch_todo_and_persists() {
     assert_eq!(app.store.load_all().unwrap(), app.todos);
     assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
     assert_eq!(
-        app.cut_buffer.as_ref().map(|todo| todo.id),
+        app.todo_register.as_ref().map(|todo| todo.id),
         Some(main_completed.id)
     );
     assert_eq!(app.error.as_deref(), Some("clear: removed 2 items"));
@@ -337,7 +343,7 @@ fn clear_without_focus_or_persistence_never_prompts_or_deletes() {
     assert!(matches!(&app.mode, Mode::Normal));
 }
 #[test]
-fn sort_orders_only_target_branch_persists_and_preserves_todo_focus_and_cut_buffer() {
+fn sort_orders_only_target_branch_persists_and_preserves_todo_focus_and_register() {
     let mut app = app_with_sections(vec![section("main"), section("feature")]);
     app.store
         .insert_todo("refs/heads/main", "first active", None)
@@ -366,7 +372,7 @@ fn sort_orders_only_target_branch_persists_and_preserves_todo_focus_and_cut_buff
     app.reload();
     let feature_before = branch_titles(&app, "refs/heads/feature");
     app.focus = Some(Focus::Todo(second_active.id));
-    app.cut_buffer = Some(feature_first.clone());
+    app.todo_register = Some(feature_first.clone());
 
     run_command(&mut app, " sort ");
 
@@ -383,7 +389,7 @@ fn sort_orders_only_target_branch_persists_and_preserves_todo_focus_and_cut_buff
     assert_eq!(app.store.load_all().unwrap(), app.todos);
     assert_eq!(app.focus, Some(Focus::Todo(second_active.id)));
     assert_eq!(
-        app.cut_buffer.as_ref().map(|todo| todo.id),
+        app.todo_register.as_ref().map(|todo| todo.id),
         Some(feature_first.id)
     );
     assert_eq!(app.error.as_deref(), Some("sort: sorted 4 items"));
@@ -523,7 +529,7 @@ fn group_stably_partitions_only_captured_branch_and_preserves_app_state() {
     );
     let feature_before = branch_titles(&app, "refs/heads/feature");
     app.focus = Some(Focus::Todo(first_active.id));
-    app.cut_buffer = Some(feature_completed.clone());
+    app.todo_register = Some(feature_completed.clone());
     app.handle_key_event(key(KeyCode::Char(':')));
     type_text(&mut app, " group ");
     app.focus = Some(Focus::Todo(feature_active.id));
@@ -541,7 +547,7 @@ fn group_stably_partitions_only_captured_branch_and_preserves_app_state() {
     assert_eq!(app.store.load_all().unwrap(), app.todos);
     assert_eq!(app.focus, Some(Focus::Todo(feature_active.id)));
     assert_eq!(
-        app.cut_buffer.as_ref().map(|todo| todo.id),
+        app.todo_register.as_ref().map(|todo| todo.id),
         Some(feature_completed.id)
     );
     assert_eq!(app.error.as_deref(), Some("group: grouped 4 items"));

@@ -10,39 +10,78 @@ fn editor(app: &App) -> &Editor {
 }
 
 #[test]
-fn yy_queues_exact_unicode_title_without_mutating_todo_state() {
+fn yy_queues_exact_unicode_title_and_replaces_todo_register_without_mutating_todos() {
     let mut app = app_with_sections(vec![section("main")]);
+    let previous = app
+        .store
+        .insert_todo("refs/heads/main", "previous register", None)
+        .unwrap();
     let todo = app
         .store
-        .insert_todo("refs/heads/main", "Ship 🚀 café", None)
+        .insert_todo("refs/heads/main", "Ship 🚀 café", Some(previous.id))
         .unwrap();
     app.store.toggle_todo(todo.id).unwrap();
     app.reload();
     app.focus = Some(Focus::Todo(todo.id));
-    app.cut_buffer = app.todos.first().cloned();
+    app.todo_register = Some(previous.clone());
     let todos_before = app.todos.clone();
     let stored_before = app.store.load_all().unwrap();
     let focus_before = app.focus.clone();
-    let cut_buffer_before = app.cut_buffer.clone();
 
     app.handle_key_event(key(KeyCode::Char('y')));
 
     assert_eq!(app.pending_operator, Some(PendingOperator::Yank));
     assert!(app.clipboard_request.is_none());
+    assert_eq!(app.todo_register, Some(previous));
     assert_eq!(app.todos, todos_before);
     assert_eq!(app.store.load_all().unwrap(), stored_before);
     assert_eq!(app.focus, focus_before);
-    assert_eq!(app.cut_buffer, cut_buffer_before);
 
     app.handle_key_event(key(KeyCode::Char('y')));
 
     assert_eq!(app.pending_operator, None);
     assert_eq!(app.clipboard_request.as_deref(), Some("Ship 🚀 café"));
+    assert_eq!(
+        app.todo_register.as_ref().map(|registered| (
+            registered.id,
+            registered.title.as_str(),
+            registered.completed
+        )),
+        Some((todo.id, "Ship 🚀 café", true))
+    );
     assert_eq!(app.todos, todos_before);
     assert_eq!(app.store.load_all().unwrap(), stored_before);
     assert_eq!(app.focus, focus_before);
-    assert!(app.todos.first().unwrap().completed);
-    assert_eq!(app.cut_buffer, cut_buffer_before);
+}
+
+#[test]
+fn yanked_todo_can_be_pasted_without_removing_the_original() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let original = app
+        .store
+        .insert_todo("refs/heads/main", "duplicate me", None)
+        .unwrap();
+    app.store.toggle_todo(original.id).unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(original.id));
+
+    app.handle_key_event(key(KeyCode::Char('y')));
+    app.handle_key_event(key(KeyCode::Char('y')));
+    app.handle_key_event(key(KeyCode::Char('p')));
+
+    assert_eq!(
+        branch_titles(&app, "refs/heads/main"),
+        vec![
+            ("duplicate me".to_owned(), true),
+            ("duplicate me".to_owned(), true)
+        ]
+    );
+    assert!(app.todos.iter().any(|todo| todo.id == original.id));
+    assert_eq!(
+        app.todo_register.as_ref().map(|registered| registered.id),
+        Some(original.id)
+    );
+    assert_eq!(app.store.load_all().unwrap(), app.todos);
 }
 
 #[test]
@@ -196,7 +235,7 @@ fn dd_requires_consecutive_keys_and_focuses_the_next_row_after_cut() {
     );
     assert_eq!(app.store.load_all().unwrap(), app.todos);
     assert_eq!(
-        app.cut_buffer.as_ref().map(|todo| todo.title.as_str()),
+        app.todo_register.as_ref().map(|todo| todo.title.as_str()),
         Some("first")
     );
 }
@@ -214,7 +253,7 @@ fn paste_register_persists_and_preserves_completion() {
 
     app.handle_key_event(key(KeyCode::Char('d')));
     app.handle_key_event(key(KeyCode::Char('d')));
-    let cut_id = app.cut_buffer.as_ref().unwrap().id;
+    let registered_id = app.todo_register.as_ref().unwrap().id;
     assert!(app.store.load_all().unwrap().is_empty());
 
     app.handle_key_event(key(KeyCode::Char('p')));
@@ -229,7 +268,7 @@ fn paste_register_persists_and_preserves_completion() {
     };
 
     assert_ne!(first_paste, second_paste);
-    assert_eq!(app.cut_buffer.as_ref().unwrap().id, cut_id);
+    assert_eq!(app.todo_register.as_ref().unwrap().id, registered_id);
     assert_eq!(
         branch_titles(&app, "refs/heads/main"),
         vec![
@@ -333,37 +372,37 @@ fn header_paste_uses_section_top_and_bottom() {
 }
 
 #[test]
-fn cut_paste_no_ops_and_failures_preserve_state() {
+fn register_paste_no_ops_and_failures_preserve_state() {
     let mut app = app_with_sections(vec![section("main")]);
     app.handle_key_event(key(KeyCode::Char('p')));
     app.handle_key_event(key(KeyCode::Char('P')));
     app.handle_key_event(key(KeyCode::Char('d')));
     app.handle_key_event(key(KeyCode::Char('d')));
     assert!(app.todos.is_empty());
-    assert!(app.cut_buffer.is_none());
+    assert!(app.todo_register.is_none());
 
     let retained = app
         .store
         .insert_todo("refs/heads/main", "retained", None)
         .unwrap();
     app.reload();
-    app.cut_buffer = Some(retained.clone());
+    app.todo_register = Some(retained.clone());
     app.focus = Some(Focus::Todo(i64::MAX));
     app.handle_key_event(key(KeyCode::Char('d')));
     app.handle_key_event(key(KeyCode::Char('d')));
 
-    assert_eq!(app.cut_buffer, Some(retained.clone()));
+    assert_eq!(app.todo_register, Some(retained.clone()));
     assert_eq!(app.store.load_all().unwrap(), app.todos);
     assert!(app.error.is_some());
 
     let mut invalid_register = retained;
     invalid_register.title = "   ".to_owned();
-    app.cut_buffer = Some(invalid_register.clone());
+    app.todo_register = Some(invalid_register.clone());
     app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
     let todos_before_failed_paste = app.todos.clone();
     app.handle_key_event(key(KeyCode::Char('p')));
 
-    assert_eq!(app.cut_buffer, Some(invalid_register));
+    assert_eq!(app.todo_register, Some(invalid_register));
     assert_eq!(app.todos, todos_before_failed_paste);
     assert_eq!(app.store.load_all().unwrap(), app.todos);
     assert!(app.error.is_some());
@@ -381,7 +420,7 @@ fn insert_mode_treats_cut_and_paste_keys_as_text() {
 
     assert_eq!(editor(&app).text, "ddpP");
     assert_eq!(app.pending_operator, None);
-    assert!(app.cut_buffer.is_none());
+    assert!(app.todo_register.is_none());
     assert!(app.store.load_all().unwrap().is_empty());
 }
 

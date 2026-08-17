@@ -98,8 +98,8 @@ impl App {
             KeyCode::Char(':') => self.open_command_line(),
             KeyCode::Char('i') => self.open_update_editor(),
             KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
-            KeyCode::Char('p') => self.paste_cut_todo(true),
-            KeyCode::Char('P') => self.paste_cut_todo(false),
+            KeyCode::Char('p') => self.paste_registered_todo(true),
+            KeyCode::Char('P') => self.paste_registered_todo(false),
             KeyCode::Esc => self.focus = None,
             KeyCode::Char('q') => self.exit = true,
             _ => {}

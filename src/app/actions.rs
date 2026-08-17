@@ -5,10 +5,11 @@ impl App {
         let Some(Focus::Todo(id)) = self.focus.as_ref() else {
             return;
         };
-        let Some(todo) = self.todos.iter().find(|todo| todo.id == *id) else {
+        let Some(todo) = self.todos.iter().find(|todo| todo.id == *id).cloned() else {
             return;
         };
         self.clipboard_request = Some(todo.title.clone());
+        self.todo_register = Some(todo);
     }
 
     pub(in crate::app) fn open_create_editor(&mut self) {
@@ -164,7 +165,7 @@ impl App {
         match self.store.delete_todo(id) {
             Ok(todo) => {
                 self.todos.retain(|candidate| candidate.id != id);
-                self.cut_buffer = Some(todo);
+                self.todo_register = Some(todo);
                 let remaining = self.flattened_focuses();
                 self.focus = removed_index
                     .and_then(|index| remaining.get(index).or_else(|| remaining.last()))
@@ -175,12 +176,12 @@ impl App {
         }
     }
 
-    pub(in crate::app) fn paste_cut_todo(&mut self, below: bool) {
+    pub(in crate::app) fn paste_registered_todo(&mut self, below: bool) {
         if !self.persistence_available {
             return;
         }
 
-        let Some(cut) = self.cut_buffer.as_ref() else {
+        let Some(registered) = self.todo_register.as_ref() else {
             return;
         };
         let Some(focus) = self.focus.as_ref() else {
@@ -219,10 +220,12 @@ impl App {
             }
         };
 
-        match self
-            .store
-            .insert_todo_with_completion(&branch_ref, &cut.title, cut.completed, after)
-        {
+        match self.store.insert_todo_with_completion(
+            &branch_ref,
+            &registered.title,
+            registered.completed,
+            after,
+        ) {
             Ok(todo) => {
                 let pasted = todo.id;
                 self.integrate_todo(todo);

@@ -41,7 +41,7 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
         todos: Vec::new(),
         focus,
         mode: Mode::Normal,
-        cut_buffer: None,
+        todo_register: None,
         pending_operator: None,
         theme: test_theme(),
         system_theme: None,
