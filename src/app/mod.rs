@@ -100,6 +100,12 @@ struct SystemThemeState {
     last_checked: Instant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingOperator {
+    Cut,
+    Yank,
+}
+
 struct App {
     exit: bool,
     repository: RepositoryContext,
@@ -109,7 +115,7 @@ struct App {
     focus: Option<Focus>,
     mode: Mode,
     cut_buffer: Option<Todo>,
-    pending_cut: bool,
+    pending_operator: Option<PendingOperator>,
     theme: Theme,
     system_theme: Option<SystemThemeState>,
     data_version: i64,
@@ -174,7 +180,7 @@ impl App {
             focus: None,
             mode: Mode::Normal,
             cut_buffer: None,
-            pending_cut: false,
+            pending_operator: None,
             theme,
             system_theme: None,
             data_version,

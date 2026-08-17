@@ -42,7 +42,7 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
         focus,
         mode: Mode::Normal,
         cut_buffer: None,
-        pending_cut: false,
+        pending_operator: None,
         theme: test_theme(),
         system_theme: None,
         data_version: 0,

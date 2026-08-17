@@ -8,7 +8,7 @@ use ratatui::{
     layout::Position,
 };
 
-use super::{App, Mode, text_input, ui};
+use super::{App, Mode, PendingOperator, text_input, ui};
 
 impl App {
     pub(in crate::app) fn handle_events(&mut self) -> io::Result<()> {
@@ -69,17 +69,26 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, code: KeyCode) {
-        if code == KeyCode::Char('d') {
-            if self.pending_cut {
-                self.pending_cut = false;
-                self.cut_focused_todo();
+        let operator = match code {
+            KeyCode::Char('d') => Some(PendingOperator::Cut),
+            KeyCode::Char('y') => Some(PendingOperator::Yank),
+            _ => None,
+        };
+
+        if let Some(operator) = operator {
+            if self.pending_operator == Some(operator) {
+                self.pending_operator = None;
+                match operator {
+                    PendingOperator::Cut => self.cut_focused_todo(),
+                    PendingOperator::Yank => self.copy_focused_todo(),
+                }
             } else {
-                self.pending_cut = true;
+                self.pending_operator = Some(operator);
             }
             return;
         }
 
-        self.pending_cut = false;
+        self.pending_operator = None;
         match code {
             KeyCode::Char('j') | KeyCode::Down => self.move_focus(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
@@ -88,7 +97,6 @@ impl App {
             KeyCode::Char('o') => self.open_create_editor(),
             KeyCode::Char(':') => self.open_command_line(),
             KeyCode::Char('i') => self.open_update_editor(),
-            KeyCode::Char('y') => self.copy_focused_todo(),
             KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
             KeyCode::Char('p') => self.paste_cut_todo(true),
             KeyCode::Char('P') => self.paste_cut_todo(false),

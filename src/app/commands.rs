@@ -24,7 +24,7 @@ impl App {
             text: String::new(),
             cursor: 0,
         });
-        self.pending_cut = false;
+        self.pending_operator = None;
         self.error = None;
     }
 

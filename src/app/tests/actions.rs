@@ -1,3 +1,4 @@
+use super::super::PendingOperator;
 use super::support::*;
 use super::*;
 
@@ -9,7 +10,7 @@ fn editor(app: &App) -> &Editor {
 }
 
 #[test]
-fn yank_queues_exact_unicode_title_without_mutating_todo_state() {
+fn yy_queues_exact_unicode_title_without_mutating_todo_state() {
     let mut app = app_with_sections(vec![section("main")]);
     let todo = app
         .store
@@ -19,7 +20,6 @@ fn yank_queues_exact_unicode_title_without_mutating_todo_state() {
     app.reload();
     app.focus = Some(Focus::Todo(todo.id));
     app.cut_buffer = app.todos.first().cloned();
-    app.pending_cut = true;
     let todos_before = app.todos.clone();
     let stored_before = app.store.load_all().unwrap();
     let focus_before = app.focus.clone();
@@ -27,24 +27,65 @@ fn yank_queues_exact_unicode_title_without_mutating_todo_state() {
 
     app.handle_key_event(key(KeyCode::Char('y')));
 
+    assert_eq!(app.pending_operator, Some(PendingOperator::Yank));
+    assert!(app.clipboard_request.is_none());
+    assert_eq!(app.todos, todos_before);
+    assert_eq!(app.store.load_all().unwrap(), stored_before);
+    assert_eq!(app.focus, focus_before);
+    assert_eq!(app.cut_buffer, cut_buffer_before);
+
+    app.handle_key_event(key(KeyCode::Char('y')));
+
+    assert_eq!(app.pending_operator, None);
     assert_eq!(app.clipboard_request.as_deref(), Some("Ship 🚀 café"));
     assert_eq!(app.todos, todos_before);
     assert_eq!(app.store.load_all().unwrap(), stored_before);
     assert_eq!(app.focus, focus_before);
     assert!(app.todos.first().unwrap().completed);
     assert_eq!(app.cut_buffer, cut_buffer_before);
-    assert!(!app.pending_cut);
 }
 
 #[test]
-fn yank_without_todo_focus_queues_nothing() {
+fn normal_key_between_yanks_cancels_yank_and_performs_its_action() {
     let mut app = app_with_sections(vec![section("main")]);
+    let first = app
+        .store
+        .insert_todo("refs/heads/main", "first", None)
+        .unwrap();
+    let second = app
+        .store
+        .insert_todo("refs/heads/main", "second", Some(first.id))
+        .unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(first.id));
 
     app.handle_key_event(key(KeyCode::Char('y')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+
+    assert_eq!(app.pending_operator, None);
+    assert_eq!(app.focus, Some(Focus::Todo(second.id)));
+    assert!(app.clipboard_request.is_none());
+
+    app.handle_key_event(key(KeyCode::Char('y')));
+
+    assert_eq!(app.pending_operator, Some(PendingOperator::Yank));
+    assert!(app.clipboard_request.is_none());
+}
+
+#[test]
+fn yy_without_todo_focus_queues_nothing() {
+    let mut app = app_with_sections(vec![section("main")]);
+    app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+
+    app.handle_key_event(key(KeyCode::Char('y')));
+    app.handle_key_event(key(KeyCode::Char('y')));
+    assert_eq!(app.pending_operator, None);
     assert!(app.clipboard_request.is_none());
 
     app.focus = None;
     app.handle_key_event(key(KeyCode::Char('y')));
+    app.handle_key_event(key(KeyCode::Char('y')));
+    assert_eq!(app.pending_operator, None);
     assert!(app.clipboard_request.is_none());
 }
 
@@ -104,11 +145,11 @@ fn escape_clears_normal_mode_row_selection() {
     app.focus = Some(Focus::Todo(todo.id));
 
     app.handle_key_event(key(KeyCode::Char('d')));
-    assert!(app.pending_cut);
+    assert_eq!(app.pending_operator, Some(PendingOperator::Cut));
     app.handle_key_event(key(KeyCode::Esc));
 
     assert_eq!(app.focus, None);
-    assert!(!app.pending_cut);
+    assert_eq!(app.pending_operator, None);
     assert_eq!(app.store.load_all().unwrap(), app.todos);
 
     app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
@@ -131,11 +172,11 @@ fn dd_requires_consecutive_keys_and_focuses_the_next_row_after_cut() {
     app.focus = Some(Focus::Todo(first.id));
 
     app.handle_key_event(key(KeyCode::Char('d')));
-    assert!(app.pending_cut);
+    assert_eq!(app.pending_operator, Some(PendingOperator::Cut));
     assert_eq!(app.store.load_all().unwrap().len(), 2);
 
     app.handle_key_event(key(KeyCode::Char('j')));
-    assert!(!app.pending_cut);
+    assert_eq!(app.pending_operator, None);
     assert_eq!(app.focus, Some(Focus::Todo(second.id)));
     assert_eq!(app.store.load_all().unwrap().len(), 2);
 
@@ -147,7 +188,7 @@ fn dd_requires_consecutive_keys_and_focuses_the_next_row_after_cut() {
     app.handle_key_event(key(KeyCode::Char('d')));
     app.handle_key_event(key(KeyCode::Char('d')));
 
-    assert!(!app.pending_cut);
+    assert_eq!(app.pending_operator, None);
     assert_eq!(app.focus, Some(Focus::Todo(second.id)));
     assert_eq!(
         branch_titles(&app, "refs/heads/main"),
@@ -339,7 +380,7 @@ fn insert_mode_treats_cut_and_paste_keys_as_text() {
     app.handle_key_event(key(KeyCode::Char('P')));
 
     assert_eq!(editor(&app).text, "ddpP");
-    assert!(!app.pending_cut);
+    assert_eq!(app.pending_operator, None);
     assert!(app.cut_buffer.is_none());
     assert!(app.store.load_all().unwrap().is_empty());
 }
