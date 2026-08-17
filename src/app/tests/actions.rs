@@ -668,7 +668,7 @@ fn edit_renders_in_place_with_the_original_completion_marker() {
     assert!(!row_text(&terminal, 5).contains("󰄲"));
     assert_eq!(
         terminal.backend_mut().get_cursor_position().unwrap(),
-        Position::new(14, 4)
+        Position::new(13, 4)
     );
     assert_eq!(app.focus, Some(Focus::Todo(second.id)));
 }

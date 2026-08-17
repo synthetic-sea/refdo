@@ -24,6 +24,8 @@ fn hover_background_applies_to_unselected_todo_and_branch_rows() {
     app.handle_mouse_event(mouse(MouseEventKind::Moved, 2, 3));
     terminal.draw(|frame| app.draw(frame)).unwrap();
     assert!(row_text(&terminal, 3).contains("󰄱 hover me"));
+    assert_eq!(terminal.backend().buffer()[(5, 3)].symbol(), "󰄱");
+    assert_eq!(terminal.backend().buffer()[(7, 3)].symbol(), "h");
     assert_eq!(
         terminal.backend().buffer()[(2, 3)].bg,
         theme.hover_background
@@ -364,9 +366,9 @@ fn long_titles_wrap_at_words_and_shift_following_rows() {
 
     terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert!(row_text(&terminal, 3).starts_with("│     󰄱 alpha beta gamma"));
-    assert!(row_text(&terminal, 4).starts_with("│       delta"));
-    assert!(row_text(&terminal, 5).starts_with("│     󰄱 following"));
+    assert!(row_text(&terminal, 3).starts_with("│    󰄱 alpha beta gamma"));
+    assert!(row_text(&terminal, 4).starts_with("│      delta"));
+    assert!(row_text(&terminal, 5).starts_with("│    󰄱 following"));
 }
 
 #[test]
@@ -384,18 +386,18 @@ fn editor_wraps_as_text_is_typed_and_shifts_following_rows() {
 
     terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert!(row_text(&terminal, 3).starts_with("│     󰄱 alpha beta gamma"));
-    assert!(row_text(&terminal, 4).starts_with("│       delta"));
-    assert!(row_text(&terminal, 5).starts_with("│     󰄱 following"));
+    assert!(row_text(&terminal, 3).starts_with("│    󰄱 alpha beta gamma"));
+    assert!(row_text(&terminal, 4).starts_with("│      delta"));
+    assert!(row_text(&terminal, 5).starts_with("│    󰄱 following"));
     assert_eq!(
         terminal.backend_mut().get_cursor_position().unwrap(),
-        Position::new(13, 4)
+        Position::new(12, 4)
     );
 
     for expected in [
-        Position::new(8, 4),
-        Position::new(19, 3),
-        Position::new(14, 3),
+        Position::new(7, 4),
+        Position::new(18, 3),
+        Position::new(13, 3),
     ] {
         app.handle_key_event(modified_key(KeyCode::Left, KeyModifiers::CONTROL));
         terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -418,16 +420,16 @@ fn unicode_overlong_words_wrap_without_splitting_graphemes() {
 
     terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert!(row_text(&terminal, 3).starts_with("│     󰄱 ab"));
-    assert!(row_text(&terminal, 4).starts_with("│       ef"));
-    assert!(row_text(&terminal, 5).starts_with("│       next"));
+    assert!(row_text(&terminal, 3).starts_with("│    󰄱 ab"));
+    assert!(row_text(&terminal, 4).starts_with("│      ef"));
+    assert!(row_text(&terminal, 5).starts_with("│      next"));
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(10, 3)].symbol(), "👩‍🔬");
-    assert_eq!(buffer[(12, 3)].symbol(), "c");
-    assert_eq!(buffer[(13, 3)].symbol(), "d");
-    assert_eq!(buffer[(14, 3)].symbol(), "界");
-    assert_eq!(buffer[(8, 4)].symbol(), "e");
-    assert_eq!(buffer[(9, 4)].symbol(), "f");
+    assert_eq!(buffer[(9, 3)].symbol(), "👩‍🔬");
+    assert_eq!(buffer[(11, 3)].symbol(), "c");
+    assert_eq!(buffer[(12, 3)].symbol(), "d");
+    assert_eq!(buffer[(13, 3)].symbol(), "界");
+    assert_eq!(buffer[(7, 4)].symbol(), "e");
+    assert_eq!(buffer[(8, 4)].symbol(), "f");
 }
 
 #[test]
@@ -492,9 +494,9 @@ fn scrolling_keeps_a_wrapped_focus_visible_and_preserves_hit_testing() {
 
     terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert!(row_text(&terminal, 2).starts_with("│     󰄱 leading"));
-    assert!(row_text(&terminal, 3).starts_with("│     󰄱 one two"));
-    assert!(row_text(&terminal, 4).starts_with("│       three"));
+    assert!(row_text(&terminal, 2).starts_with("│    󰄱 leading"));
+    assert!(row_text(&terminal, 3).starts_with("│    󰄱 one two"));
+    assert!(row_text(&terminal, 4).starts_with("│      three"));
     for row in [3, 4] {
         assert_eq!(
             terminal.backend().buffer()[(2, row)].bg,

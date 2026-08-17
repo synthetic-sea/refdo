@@ -86,7 +86,7 @@ fn display_rows<'a>(
     }
     rows
 }
-const TODO_PREFIX_WIDTH: u16 = 6;
+const TODO_PREFIX_WIDTH: u16 = 5;
 
 pub(in crate::app) struct DisplayRowLayout<'a> {
     pub(super) row: DisplayRow<'a>,

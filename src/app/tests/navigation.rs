@@ -161,7 +161,7 @@ fn exact_width_editor_keeps_a_full_grapheme_visible() {
 
     assert_eq!(
         terminal.backend_mut().get_cursor_position().unwrap(),
-        Position::new(10, 2)
+        Position::new(9, 2)
     );
-    assert_eq!(terminal.backend().buffer()[(8, 2)].symbol(), "👩‍🔬");
+    assert_eq!(terminal.backend().buffer()[(7, 2)].symbol(), "👩‍🔬");
 }

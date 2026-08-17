@@ -16,7 +16,7 @@ use crate::theme::Theme;
 
 const INCOMPLETE_TODO_MARKER: &str = "󰄱";
 const COMPLETE_TODO_MARKER: &str = "󰄲";
-const TODO_PREFIX_WIDTH: u16 = 6;
+const TODO_PREFIX_WIDTH: u16 = 5;
 pub(in crate::app) fn render_status_bar(
     frame: &mut Frame,
     area: Rect,
@@ -180,7 +180,7 @@ pub(in crate::app) fn render_branch_sections(
                     1,
                 );
                 frame.render_widget(
-                    Paragraph::new(format!("    {marker} ")).style(style),
+                    Paragraph::new(format!("   {marker} ")).style(style),
                     marker_area,
                 );
 
@@ -212,7 +212,7 @@ pub(in crate::app) fn render_branch_sections(
             ),
             DisplayRow::Empty => {
                 frame.render_widget(
-                    Paragraph::new("    No todos").style(
+                    Paragraph::new("   No todos").style(
                         Style::default()
                             .fg(theme.foreground_muted)
                             .bg(theme.background),
@@ -315,7 +315,7 @@ fn render_editor(
         area.height.min(1),
     );
     frame.render_widget(
-        Paragraph::new(format!("    {marker} ")).style(style),
+        Paragraph::new(format!("   {marker} ")).style(style),
         marker_area,
     );
 
