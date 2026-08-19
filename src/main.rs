@@ -12,6 +12,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::load()?;
     let light_theme = theme::by_name(&config.theme.light)?;
     let dark_theme = theme::by_name(&config.theme.dark)?;
-    app::run(light_theme, dark_theme, config.theme.mode)?;
+    app::run(
+        light_theme,
+        dark_theme,
+        config.theme.mode,
+        config.dispatch,
+        config.dispatches,
+    )?;
     Ok(())
 }

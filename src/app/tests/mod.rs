@@ -7,10 +7,12 @@ mod theme;
 mod ui;
 
 use super::{
-    App, ClearConfirmation, CommandLine, Editor, EditorTarget, Focus, Mode, UNKNOWN_DATA_VERSION,
+    App, ClearConfirmation, CommandLine, DispatchController, Editor, EditorTarget, Focus, Mode,
+    UNKNOWN_DATA_VERSION,
 };
+use crate::config::{DispatchDefinition, DispatchSettings};
 use crate::repository::{BranchSection, RepositoryContext};
-use crate::storage::TodoStore;
+use crate::storage::{TodoId, TodoStore};
 use crate::theme::Theme;
 use ratatui::{
     Terminal,

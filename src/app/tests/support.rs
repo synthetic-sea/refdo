@@ -46,6 +46,7 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
         theme: test_theme(),
         system_theme: None,
         data_version: 0,
+        dispatch: DispatchController::default(),
         error: None,
         clipboard_request: None,
         pointer_position: None,
@@ -54,6 +55,20 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
         viewport_start: 0,
         reveal_focus: true,
     }
+}
+
+pub(super) fn app_with_dispatch(sections: Vec<BranchSection>, name: &str, command: &str) -> App {
+    let mut app = app_with_sections(sections);
+    app.dispatch = DispatchController::new(
+        DispatchSettings::default(),
+        std::collections::BTreeMap::from([(
+            name.to_owned(),
+            DispatchDefinition {
+                command: command.to_owned(),
+            },
+        )]),
+    );
+    app
 }
 
 pub(super) fn key(code: KeyCode) -> KeyEvent {

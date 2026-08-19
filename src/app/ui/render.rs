@@ -93,6 +93,7 @@ pub(in crate::app) fn render_footer(
         area,
     );
 }
+#[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn render_branch_sections(
     frame: &mut Frame,
     area: Rect,

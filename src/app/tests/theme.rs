@@ -18,7 +18,9 @@ fn system_theme_changes_from_dark_to_light() {
     let (light, dark) = themes();
     let started = Instant::now();
     let mut app =
-        App::new_system_with_detector(light, dark, started, || Some(dark_light::Mode::Dark));
+        App::new_system_with_detector(light, dark, DispatchController::default(), started, || {
+            Some(dark_light::Mode::Dark)
+        });
 
     assert_eq!(app.theme, dark);
     app.refresh_system_theme_with(started + Duration::from_millis(500), || {
@@ -33,7 +35,9 @@ fn system_theme_changes_from_light_to_dark() {
     let (light, dark) = themes();
     let started = Instant::now();
     let mut app =
-        App::new_system_with_detector(light, dark, started, || Some(dark_light::Mode::Light));
+        App::new_system_with_detector(light, dark, DispatchController::default(), started, || {
+            Some(dark_light::Mode::Light)
+        });
 
     assert_eq!(app.theme, light);
     app.refresh_system_theme_with(started + Duration::from_millis(500), || {
@@ -48,7 +52,9 @@ fn unspecified_and_failed_runtime_detection_preserve_current_theme() {
     let (light, dark) = themes();
     let started = Instant::now();
     let mut app =
-        App::new_system_with_detector(light, dark, started, || Some(dark_light::Mode::Dark));
+        App::new_system_with_detector(light, dark, DispatchController::default(), started, || {
+            Some(dark_light::Mode::Dark)
+        });
 
     app.refresh_system_theme_with(started + Duration::from_millis(500), || {
         Some(dark_light::Mode::Unspecified)
@@ -65,8 +71,11 @@ fn unspecified_and_failed_initial_detection_start_light() {
     let started = Instant::now();
 
     let unspecified =
-        App::new_system_with_detector(light, dark, started, || Some(dark_light::Mode::Unspecified));
-    let failed = App::new_system_with_detector(light, dark, started, || None);
+        App::new_system_with_detector(light, dark, DispatchController::default(), started, || {
+            Some(dark_light::Mode::Unspecified)
+        });
+    let failed =
+        App::new_system_with_detector(light, dark, DispatchController::default(), started, || None);
 
     assert_eq!(unspecified.theme, light);
     assert_eq!(failed.theme, light);
@@ -75,7 +84,7 @@ fn unspecified_and_failed_initial_detection_start_light() {
 #[test]
 fn fixed_theme_never_detects_or_changes() {
     let (light, _) = themes();
-    let mut app = App::new(light);
+    let mut app = App::new(light, DispatchController::default());
     let detections = Cell::new(0);
 
     app.refresh_system_theme_with(Instant::now() + Duration::from_secs(1), || {
@@ -92,7 +101,9 @@ fn system_detection_is_gated_by_the_refresh_interval() {
     let (light, dark) = themes();
     let started = Instant::now();
     let mut app =
-        App::new_system_with_detector(light, dark, started, || Some(dark_light::Mode::Light));
+        App::new_system_with_detector(light, dark, DispatchController::default(), started, || {
+            Some(dark_light::Mode::Light)
+        });
     let detections = Cell::new(0);
 
     app.refresh_system_theme_with(started + Duration::from_millis(499), || {

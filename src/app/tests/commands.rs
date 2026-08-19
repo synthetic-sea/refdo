@@ -1,3 +1,11 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
 use super::support::*;
 use super::*;
 
@@ -23,6 +31,7 @@ fn command_mode_captures_branch_and_renders_text_and_cursor_in_footer() {
         command_line(&app).target_branch.as_deref(),
         Some("refs/heads/main")
     );
+    assert_eq!(command_line(&app).target_todo, None);
     let backend = TestBackend::new(30, 6);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -109,6 +118,7 @@ fn command_target_resolves_from_headers_and_todos_when_opened() {
         command_line(&app).target_branch.as_deref(),
         Some("refs/heads/main")
     );
+    assert_eq!(command_line(&app).target_todo, None);
     app.handle_key_event(key(KeyCode::Esc));
 
     app.focus = Some(Focus::Todo(todo.id));
@@ -117,6 +127,12 @@ fn command_target_resolves_from_headers_and_todos_when_opened() {
         command_line(&app).target_branch.as_deref(),
         Some("refs/heads/feature")
     );
+    assert_eq!(command_line(&app).target_todo, Some(todo.id));
+    app.handle_key_event(key(KeyCode::Esc));
+    app.todos.clear();
+    app.focus = Some(Focus::Todo(todo.id));
+    app.handle_key_event(key(KeyCode::Char(':')));
+    assert_eq!(command_line(&app).target_todo, None);
 }
 
 #[test]
@@ -584,4 +600,196 @@ fn group_without_focus_or_persistence_fails_without_reordering() {
     assert_eq!(app.error.as_deref(), Some("group: persistence unavailable"));
     assert_eq!(app.store.load_all().unwrap(), before);
     assert!(matches!(&app.mode, Mode::Normal));
+}
+
+static TEMP_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    fn new() -> Self {
+        let unique = TEMP_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "refdo-command-dispatch-{}-{nanos}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn insert_and_focus_todo(app: &mut App, branch_ref: &str, title: &str) -> TodoId {
+    let todo = app.store.insert_todo(branch_ref, title, None).unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(todo.id));
+    todo.id
+}
+
+fn wait_for_dispatch_footer(app: &mut App, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        app.refresh_dispatch();
+        if app.error.as_deref() == Some(expected) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(app.error.as_deref(), Some(expected));
+}
+
+#[test]
+fn dispatch_uses_todo_captured_when_command_line_opened() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(
+        vec![main],
+        "record",
+        "printf '%s' {{CONTENT}} > dispatch-content",
+    );
+    let selected = insert_and_focus_todo(&mut app, "refs/heads/main", "captured todo");
+    let other = app
+        .store
+        .insert_todo("refs/heads/main", "later focus", None)
+        .unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(selected));
+
+    app.handle_key_event(key(KeyCode::Char(':')));
+    assert_eq!(command_line(&app).target_todo, Some(selected));
+    app.focus = Some(Focus::Todo(other.id));
+    type_text(&mut app, "dispatch record");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(app.error.as_deref(), Some("dispatch: running 'record'"));
+    wait_for_dispatch_footer(&mut app, "dispatch: 'record' completed");
+    assert_eq!(
+        fs::read_to_string(directory.path().join("dispatch-content")).unwrap(),
+        "captured todo"
+    );
+}
+
+#[test]
+fn dispatch_requires_exactly_one_name_and_rejects_unknown_names() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(vec![main], "known", "true");
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+
+    for malformed in ["dispatch", "dispatch known extra"] {
+        run_command(&mut app, malformed);
+        assert_eq!(
+            app.error.as_deref(),
+            Some("dispatch: expected :dispatch <name>")
+        );
+    }
+
+    run_command(&mut app, "dispatch missing");
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: unknown dispatch 'missing'")
+    );
+}
+
+#[test]
+fn dispatch_requires_a_currently_existing_selected_todo() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(vec![main], "known", "true");
+
+    run_command(&mut app, "dispatch known");
+    assert_eq!(app.error.as_deref(), Some("dispatch: no todo selected"));
+
+    app.focus = None;
+    run_command(&mut app, "dispatch known");
+    assert_eq!(app.error.as_deref(), Some("dispatch: no todo selected"));
+
+    let selected = insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+    app.handle_key_event(key(KeyCode::Char(':')));
+    app.todos.retain(|todo| todo.id != selected);
+    type_text(&mut app, "dispatch known");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: selected todo no longer exists")
+    );
+}
+
+#[test]
+fn dispatch_rejects_stored_only_missing_and_empty_worktrees() {
+    let directory = TestDirectory::new();
+
+    let mut stored = section("main");
+    stored.worktree_path = directory.path().to_owned();
+    stored.is_stored_only = true;
+    let mut stored_app = app_with_dispatch(vec![stored], "known", "true");
+    insert_and_focus_todo(&mut stored_app, "refs/heads/main", "stored");
+    run_command(&mut stored_app, "dispatch known");
+    assert_eq!(
+        stored_app.error.as_deref(),
+        Some("dispatch: selected todo has no worktree")
+    );
+
+    let mut missing_app = app_with_dispatch(vec![section("main")], "known", "true");
+    insert_and_focus_todo(&mut missing_app, "refs/heads/main", "missing");
+    missing_app.repository.sections.clear();
+    run_command(&mut missing_app, "dispatch known");
+    assert_eq!(
+        missing_app.error.as_deref(),
+        Some("dispatch: selected todo has no worktree")
+    );
+
+    let mut empty = section("main");
+    empty.worktree_path = PathBuf::new();
+    let mut empty_app = app_with_dispatch(vec![empty], "known", "true");
+    insert_and_focus_todo(&mut empty_app, "refs/heads/main", "empty");
+    run_command(&mut empty_app, "dispatch known");
+    assert_eq!(
+        empty_app.error.as_deref(),
+        Some("dispatch: selected todo has no worktree")
+    );
+}
+
+#[test]
+fn dispatch_reports_running_immediately_and_async_success() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(vec![main], "slow", "sleep 0.1");
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+
+    run_command(&mut app, "dispatch slow");
+
+    assert_eq!(app.error.as_deref(), Some("dispatch: running 'slow'"));
+    wait_for_dispatch_footer(&mut app, "dispatch: 'slow' completed");
+}
+
+#[test]
+fn dispatch_surfaces_async_failure_in_footer() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(vec![main], "fail", "printf 'fixture failed\n' >&2; exit 7");
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+
+    run_command(&mut app, "dispatch fail");
+
+    assert_eq!(app.error.as_deref(), Some("dispatch: running 'fail'"));
+    wait_for_dispatch_footer(&mut app, "dispatch: 'fail' failed: fixture failed");
 }

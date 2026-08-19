@@ -1,11 +1,13 @@
 mod actions;
 mod commands;
+mod dispatch;
 mod events;
 mod navigation;
 mod text_input;
 mod ui;
 
 use std::{
+    collections::BTreeMap,
     io,
     time::{Duration, Instant},
 };
@@ -23,7 +25,9 @@ use ratatui::{
     widgets::{Block, Padding},
 };
 
-use crate::config::ThemeMode;
+use dispatch::DispatchController;
+
+use crate::config::{DispatchDefinition, DispatchSettings, ThemeMode};
 use crate::repository::RepositoryContext;
 use crate::storage::{Todo, TodoId, TodoStore};
 use crate::theme::{TOKYO_NIGHT_DAY, Theme};
@@ -86,6 +90,7 @@ struct Editor {
 #[derive(Clone, Debug)]
 struct CommandLine {
     target_branch: Option<String>,
+    target_todo: Option<TodoId>,
     text: String,
     cursor: usize,
 }
@@ -126,6 +131,7 @@ struct App {
     theme: Theme,
     system_theme: Option<SystemThemeState>,
     data_version: i64,
+    dispatch: DispatchController,
     error: Option<String>,
     clipboard_request: Option<String>,
     pointer_position: Option<Position>,
@@ -137,12 +143,12 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
-        Self::new(TOKYO_NIGHT_DAY)
+        Self::new(TOKYO_NIGHT_DAY, DispatchController::default())
     }
 }
 
 impl App {
-    fn new(theme: Theme) -> Self {
+    fn new(theme: Theme, dispatch: DispatchController) -> Self {
         let mut repository = RepositoryContext::discover(".").unwrap_or_default();
         let (store, mut error, persistence_available) =
             if repository.common_git_dir.as_os_str().is_empty() {
@@ -192,6 +198,7 @@ impl App {
             theme,
             system_theme: None,
             data_version,
+            dispatch,
             error,
             clipboard_request: None,
             pointer_position: None,
@@ -202,8 +209,8 @@ impl App {
         }
     }
 
-    fn new_system(light_theme: Theme, dark_theme: Theme) -> Self {
-        Self::new_system_with_detector(light_theme, dark_theme, Instant::now(), || {
+    fn new_system(light_theme: Theme, dark_theme: Theme, dispatch: DispatchController) -> Self {
+        Self::new_system_with_detector(light_theme, dark_theme, dispatch, Instant::now(), || {
             dark_light::detect().ok()
         })
     }
@@ -211,6 +218,7 @@ impl App {
     fn new_system_with_detector(
         light_theme: Theme,
         dark_theme: Theme,
+        dispatch: DispatchController,
         now: Instant,
         detect: impl FnOnce() -> Option<dark_light::Mode>,
     ) -> Self {
@@ -218,7 +226,7 @@ impl App {
             Some(dark_light::Mode::Dark) => dark_theme,
             Some(dark_light::Mode::Light | dark_light::Mode::Unspecified) | None => light_theme,
         };
-        let mut app = Self::new(theme);
+        let mut app = Self::new(theme, dispatch);
         app.system_theme = Some(SystemThemeState {
             light_theme,
             dark_theme,
@@ -397,12 +405,19 @@ impl App {
 #[cfg(test)]
 mod tests;
 
-pub(crate) fn run(light_theme: Theme, dark_theme: Theme, mode: ThemeMode) -> std::io::Result<()> {
+pub(crate) fn run(
+    light_theme: Theme,
+    dark_theme: Theme,
+    mode: ThemeMode,
+    dispatch_settings: DispatchSettings,
+    dispatch_definitions: BTreeMap<String, DispatchDefinition>,
+) -> std::io::Result<()> {
     ratatui::run(|terminal| {
+        let dispatch = DispatchController::new(dispatch_settings, dispatch_definitions);
         let mut app = match mode {
-            ThemeMode::Light => App::new(light_theme),
-            ThemeMode::Dark => App::new(dark_theme),
-            ThemeMode::System => App::new_system(light_theme, dark_theme),
+            ThemeMode::Light => App::new(light_theme, dispatch),
+            ThemeMode::Dark => App::new(dark_theme, dispatch),
+            ThemeMode::System => App::new_system(light_theme, dark_theme, dispatch),
         };
         app.run(terminal)
     })

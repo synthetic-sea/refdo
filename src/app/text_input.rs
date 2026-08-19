@@ -76,7 +76,7 @@ fn previous_word_boundary(text: &str, cursor: usize) -> usize {
         .split_word_bound_indices()
         .filter(|(_, segment)| !segment.chars().all(char::is_whitespace))
         .map(|(index, _)| index)
-        .last()
+        .next_back()
         .unwrap_or(0)
 }
 

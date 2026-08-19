@@ -19,8 +19,13 @@ impl App {
                 .map(|todo| todo.branch_ref.clone()),
             _ => None,
         };
+        let target_todo = match self.focus.as_ref() {
+            Some(Focus::Todo(id)) if self.todos.iter().any(|todo| todo.id == *id) => Some(*id),
+            _ => None,
+        };
         self.mode = Mode::Command(CommandLine {
             target_branch,
+            target_todo,
             text: String::new(),
             cursor: 0,
         });
@@ -77,12 +82,28 @@ impl App {
         };
         let name = command.text.trim().to_owned();
         let target_branch = command.target_branch.clone();
+        let target_todo = command.target_todo;
         self.mode = Mode::Normal;
 
         if name.is_empty() {
             self.error = None;
             return;
         }
+
+        let mut tokens = name.split_whitespace();
+        if tokens.next() == Some("dispatch") {
+            let Some(dispatch_name) = tokens.next() else {
+                self.error = Some("dispatch: expected :dispatch <name>".to_owned());
+                return;
+            };
+            if tokens.next().is_some() {
+                self.error = Some("dispatch: expected :dispatch <name>".to_owned());
+                return;
+            }
+            self.start_dispatch(dispatch_name, target_todo, target_branch);
+            return;
+        }
+
         if name != "prune" && name != "sort" && name != "group" && name != "clear" {
             self.error = Some(format!("Unknown command: {name}"));
             return;
@@ -137,6 +158,45 @@ impl App {
                 self.error = Some(message);
             }
             Err(error) => self.error = Some(format!("{name}: {error}")),
+        }
+    }
+
+    fn start_dispatch(
+        &mut self,
+        name: &str,
+        target_todo: Option<crate::storage::TodoId>,
+        target_branch: Option<String>,
+    ) {
+        let Some(target_todo) = target_todo else {
+            self.error = Some("dispatch: no todo selected".to_owned());
+            return;
+        };
+        let Some(content) = self
+            .todos
+            .iter()
+            .find(|todo| todo.id == target_todo)
+            .map(|todo| todo.title.clone())
+        else {
+            self.error = Some("dispatch: selected todo no longer exists".to_owned());
+            return;
+        };
+        let Some(worktree_path) = target_branch.and_then(|branch_ref| {
+            self.repository
+                .sections
+                .iter()
+                .find(|section| section.full_ref_name == branch_ref)
+                .filter(|section| {
+                    !section.is_stored_only && !section.worktree_path.as_os_str().is_empty()
+                })
+                .map(|section| section.worktree_path.clone())
+        }) else {
+            self.error = Some("dispatch: selected todo has no worktree".to_owned());
+            return;
+        };
+
+        match self.dispatch.start(name, content, worktree_path) {
+            Ok(()) => self.error = Some(format!("dispatch: running '{name}'")),
+            Err(error) => self.error = Some(error),
         }
     }
 }

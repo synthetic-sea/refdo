@@ -74,7 +74,7 @@ These controls apply while creating or editing a todo and while entering a comma
 
 ### Colon commands
 
-Commands affect the selected todo's branch, or the selected branch when a branch header is selected.
+The built-in commands affect the selected todo's branch, or the selected branch when a branch header is selected. Dispatches require a selected todo in a Git worktree.
 
 | Command | Effect |
 | --- | --- |
@@ -82,6 +82,7 @@ Commands affect the selected todo's branch, or the selected branch when a branch
 | `:sort` | Put incomplete todos before completed todos, ordering each group by creation time. |
 | `:group` | Put incomplete todos before completed todos while preserving the current order within each group. |
 | `:clear` | Ask for confirmation, then delete every todo in the affected branch. |
+| `:dispatch <name>` | Run the configured named dispatch for the selected todo. |
 
 When confirmation is shown, press `y` or `Y` to confirm. Press `n`, `N`, `Enter`, or `Esc` to cancel.
 
@@ -107,6 +108,33 @@ mode = "system"
 ```
 
 `light` and `dark` select the built-in themes used for each appearance. Setting `mode` to `light` or `dark` keeps that appearance fixed; `system` follows operating-system appearance changes while refdo is running and falls back to light on startup only when the appearance cannot be detected.
+
+### Named dispatches
+
+Named dispatches are Bash commands loaded from `config.toml` when refdo starts. Configuration changes take effect only after restarting refdo.
+
+Define the optional global branch-name generator under `[dispatch]` and each command under `[dispatches.<name>]`:
+
+```toml
+[dispatch]
+generate_branch_name_command = 'omp --model gemini-3.7-flash --thinking low "Create a git branch name for the following todo item: "{{CONTENT}}'
+
+[dispatches.implement]
+command = './scripts/implement.sh {{BRANCH}} omp {{CONTENT}}'
+```
+
+Run this example by selecting a todo and entering `:dispatch implement`. The command runs with the selected todo's worktree as its current directory; dispatching is unavailable when no todo is selected or its branch has no worktree.
+
+Dispatch commands support `{{CONTENT}}`, which is the selected todo title, and `{{BRANCH}}`, which is the generator's output. Placeholders must appear unquoted in the configured shell source. refdo replaces them with quoted Bash positional parameters (`"$1"` and `"$2"`), so spaces, quotes, newlines, substitutions, and other shell metacharacters in their values remain data rather than being reparsed as commands.
+
+`generate_branch_name_command` is optional and supports `{{CONTENT}}` but not `{{BRANCH}}`. It runs first, in the same worktree, only when the selected dispatch contains `{{BRANCH}}`. Its stdout must be valid UTF-8 containing exactly one non-empty line after trimming. A dispatch without `{{BRANCH}}` does not invoke the generator:
+
+```toml
+[dispatches.notify]
+command = 'printf "%s\n" {{CONTENT}} > dispatch-result.txt'
+```
+
+Only one dispatch may run at a time. Execution is asynchronous, so refdo remains interactive while the footer reports running and completion status. refdo invokes configured source through `bash -lc`; dispatch configuration is trusted executable code and is not sandboxed. Subprocess stdout and stderr are captured rather than inherited by the TUI: generator stdout supplies the branch name, while dispatch stdout is not displayed. A nonzero process reports the first non-empty stderr line when available or its exit status otherwise; startup, working-directory, and invalid generator-output errors are reported directly.
 
 ## Storage
 

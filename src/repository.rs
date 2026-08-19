@@ -30,6 +30,7 @@ impl Default for RepositoryContext {
 }
 
 impl RepositoryContext {
+    #[allow(clippy::result_large_err)]
     pub fn discover(path: impl AsRef<std::path::Path>) -> Result<Self, gix::discover::Error> {
         let repository = gix::discover(path)?;
         let current_git_dir = repository.git_dir().to_path_buf();
