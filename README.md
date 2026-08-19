@@ -111,30 +111,118 @@ mode = "system"
 
 ### Named dispatches
 
-Named dispatches are Bash commands loaded from `config.toml` when refdo starts. Configuration changes take effect only after restarting refdo.
+Named dispatches are Bash commands loaded from `config.toml` when refdo starts. Configuration changes take effect only after restarting refdo. The dispatch configuration is global, while relative command paths are resolved from the selected todo's worktree. This lets every repository provide its own implementation script at the same path.
 
-Define the optional global branch-name generator under `[dispatch]` and each command under `[dispatches.<name>]`:
+#### Implementing a todo with OMP, Worktrunk, and Herdr
+
+The following example generates a branch name with a one-shot OMP invocation, creates a worktree with [Worktrunk](https://worktrunk.dev/), opens that worktree in Herdr, and launches an OMP agent with the todo title as its initial prompt.
+
+It requires:
+
+- `omp`, configured with access to the selected model;
+- `wt` from Worktrunk;
+- the `herdr` CLI and a refdo process launched inside a Herdr workspace terminal;
+- `jq`; and
+- Bash, which refdo uses to execute dispatch commands.
+
+Add this to the platform `config.toml` described above:
 
 ```toml
 [dispatch]
-generate_branch_name_command = 'omp --model gemini-3.7-flash --thinking low "Create a git branch name for the following todo item: "{{CONTENT}}'
+generate_branch_name_command = "omp -p --no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title --max-time 30s --model gemini-3.7-flash --thinking low --system-prompt 'Generate a Git branch name from the user message. Output exactly one non-empty line and nothing else. The name must pass git check-ref-format --branch. Use lowercase ASCII letters, digits, hyphens, and forward slashes. Prefer a prefix such as feat/, fix/, docs/, refactor/, test/, or chore/. Maximum 60 characters. Do not output Markdown, quotes, explanation, or trailing punctuation.' -- {{CONTENT}}"
 
 [dispatches.implement]
 command = './scripts/implement.sh {{BRANCH}} omp {{CONTENT}}'
 ```
 
-Run this example by selecting a todo and entering `:dispatch implement`. The command runs with the selected todo's worktree as its current directory; dispatching is unavailable when no todo is selected or its branch has no worktree.
+The `-p` flag makes OMP process the prompt non-interactively, print its response, and exit. `--no-session` avoids retaining a branch-generation session, while `--no-tools` and the other `--no-*` flags keep this small request isolated from repository tools and customization. `--max-time 30s` prevents the generator from remaining open indefinitely. The `--` before `{{CONTENT}}` ends option parsing, so a todo title beginning with `-` remains input data.
+
+Place the following executable at `scripts/implement.sh` in each repository that supports the `implement` dispatch:
+
+```sh
+#!/bin/sh
+set -eu
+
+launch_agent_in_worktree() {
+  if [ "$#" -ne 1 ]; then
+    printf 'Error: internal launch requires a worktree path.\n' >&2
+    exit 2
+  fi
+
+  worktree_path=$1
+  cd "$worktree_path"
+
+  opened=$(herdr worktree open \
+    --workspace "$HERDR_PARENT_WORKSPACE_ID" \
+    --path "$PWD" \
+    --label "$WT_TARGET_BRANCH" \
+    --focus)
+
+  pane_id=$(printf '%s\n' "$opened" | jq -er '.result.root_pane.pane_id')
+  quoted_agent=$(printf '%s' "$AGENT_EXECUTABLE" | jq -Rrs @sh)
+  quoted_prompt=$(printf '%s' "$INITIAL_PROMPT" | jq -Rrs @sh)
+
+  herdr pane run "$pane_id" "$quoted_agent $quoted_prompt"
+}
+
+if [ "${1:-}" = "--launch-worktree" ]; then
+  shift
+  launch_agent_in_worktree "$@"
+  exit 0
+fi
+
+if [ "$#" -ne 3 ]; then
+  printf 'Usage: %s <branch-name> <agent> <initial-prompt>\n' "$0" >&2
+  exit 2
+fi
+
+if [ "${HERDR_ENV:-}" != 1 ] || [ -z "${HERDR_WORKSPACE_ID:-}" ]; then
+  printf 'Error: this script must be executed from inside a Herdr workspace terminal.\n' >&2
+  exit 1
+fi
+
+branch=$1
+agent=$2
+prompt=$3
+
+export HERDR_PARENT_WORKSPACE_ID="$HERDR_WORKSPACE_ID"
+export WT_TARGET_BRANCH="$branch"
+export AGENT_EXECUTABLE="$agent"
+export INITIAL_PROMPT="$prompt"
+
+wt switch \
+  --create \
+  --no-cd \
+  --execute sh \
+  "$branch" \
+  -- \
+  "$0" \
+  --launch-worktree \
+  "{{ worktree_path }}"
+```
+
+Make the script executable:
+
+```sh
+chmod +x scripts/implement.sh
+```
+
+Restart refdo, launch it from the repository in a Herdr workspace terminal, select a todo row, and enter `:dispatch implement`. The global generator receives the todo title and emits a single branch name. refdo then runs the repository's `./scripts/implement.sh` with exactly three arguments: the generated branch name, `omp`, and the literal todo title. The script creates the worktree, opens it in Herdr, and starts OMP in its root pane.
+
+#### Templates and execution
 
 Dispatch commands support `{{CONTENT}}`, which is the selected todo title, and `{{BRANCH}}`, which is the generator's output. Placeholders must appear unquoted in the configured shell source. refdo replaces them with quoted Bash positional parameters (`"$1"` and `"$2"`), so spaces, quotes, newlines, substitutions, and other shell metacharacters in their values remain data rather than being reparsed as commands.
 
-`generate_branch_name_command` is optional and supports `{{CONTENT}}` but not `{{BRANCH}}`. It runs first, in the same worktree, only when the selected dispatch contains `{{BRANCH}}`. Its stdout must be valid UTF-8 containing exactly one non-empty line after trimming. A dispatch without `{{BRANCH}}` does not invoke the generator:
+`generate_branch_name_command` is optional and supports `{{CONTENT}}` but not `{{BRANCH}}`. It runs first, in the selected todo's worktree, only when the selected dispatch contains `{{BRANCH}}`. Its stdout must be valid UTF-8 containing exactly one non-empty line after trimming. A dispatch without `{{BRANCH}}` does not invoke the generator:
 
 ```toml
 [dispatches.notify]
 command = 'printf "%s\n" {{CONTENT}} > dispatch-result.txt'
 ```
 
-Only one dispatch may run at a time. Execution is asynchronous, so refdo remains interactive while the footer reports running and completion status. refdo invokes configured source through `bash -lc`; dispatch configuration is trusted executable code and is not sandboxed. Subprocess stdout and stderr are captured rather than inherited by the TUI: generator stdout supplies the branch name, while dispatch stdout is not displayed. A nonzero process reports the first non-empty stderr line when available or its exit status otherwise; startup, working-directory, and invalid generator-output errors are reported directly.
+A dispatch requires a selected todo whose branch has a worktree. Only one dispatch may run at a time. Execution is asynchronous, so refdo remains interactive while the footer reports running and completion status.
+
+refdo invokes configured source through `bash -lc`; dispatch configuration is trusted executable code and is not sandboxed. Subprocess stdout and stderr are captured rather than inherited by the TUI: generator stdout supplies the branch name, while dispatch stdout is not displayed. A nonzero process reports the first non-empty stderr line when available or its exit status otherwise; startup, working-directory, and invalid generator-output errors are reported directly.
 
 ## Storage
 
