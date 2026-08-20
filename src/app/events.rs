@@ -165,6 +165,21 @@ impl App {
                 }
                 return;
             }
+            Mode::ConfirmDispatchTrust(_) => {
+                match key.code {
+                    KeyCode::Char('y' | 'Y')
+                        if key.modifiers == KeyModifiers::NONE
+                            || key.modifiers == KeyModifiers::SHIFT =>
+                    {
+                        self.confirm_dispatch_trust();
+                    }
+                    KeyCode::Char('n' | 'N') | KeyCode::Enter | KeyCode::Esc => {
+                        self.discard_dispatch_trust_confirmation();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             Mode::Insert(_) => match key.code {
                 KeyCode::Enter => {
                     self.commit_editor();
@@ -187,7 +202,7 @@ impl App {
             Mode::Command(command) => {
                 text_input::edit_line(&mut command.text, &mut command.cursor, &key);
             }
-            Mode::Normal | Mode::ConfirmClear(_) => {}
+            Mode::Normal | Mode::ConfirmClear(_) | Mode::ConfirmDispatchTrust(_) => {}
         }
     }
 }

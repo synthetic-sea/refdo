@@ -57,17 +57,45 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
     }
 }
 
+pub(super) fn write_dispatch_config(
+    worktree_path: &std::path::Path,
+    definitions: &[(&str, &str)],
+) -> DispatchConfigDigest {
+    let contents = definitions
+        .iter()
+        .map(|(name, command)| {
+            format!(
+                "[dispatches.{name}]\ncommand = {}\n",
+                toml::Value::String((*command).to_owned())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(worktree_path.join(".refdo.toml"), contents).unwrap();
+    load_repository_dispatch_config(worktree_path)
+        .unwrap()
+        .unwrap()
+        .digest
+}
+
+pub(super) fn trust_dispatch_config(app: &App, digest: &DispatchConfigDigest) {
+    app.store.trust_dispatch_config(digest).unwrap();
+}
+
 pub(super) fn app_with_dispatch(sections: Vec<BranchSection>, name: &str, command: &str) -> App {
     let mut app = app_with_sections(sections);
-    app.dispatch = DispatchController::new(
-        DispatchSettings::default(),
-        std::collections::BTreeMap::from([(
-            name.to_owned(),
-            DispatchDefinition {
-                command: command.to_owned(),
-            },
-        )]),
-    );
+    app.dispatch = DispatchController::new(DispatchSettings::default());
+    let worktrees = app
+        .repository
+        .sections
+        .iter()
+        .filter(|section| section.worktree_path.is_dir())
+        .map(|section| section.worktree_path.clone())
+        .collect::<Vec<_>>();
+    for worktree in worktrees {
+        let digest = write_dispatch_config(&worktree, &[(name, command)]);
+        trust_dispatch_config(&app, &digest);
+    }
     app
 }
 

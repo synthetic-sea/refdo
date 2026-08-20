@@ -9,6 +9,7 @@ use std::{
 
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const APP_DIRECTORY: &str = "refdo";
 const CONFIG_FILE: &str = "config.toml";
@@ -28,8 +29,21 @@ pub(crate) struct Config {
     pub(crate) theme: ThemeConfig,
     #[serde(default, skip_serializing_if = "DispatchSettings::is_empty")]
     pub(crate) dispatch: DispatchSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositoryDispatchConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dispatches: BTreeMap<String, DispatchDefinition>,
+}
+
+pub(crate) type DispatchConfigDigest = [u8; 32];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoadedDispatchConfig {
     pub(crate) dispatches: BTreeMap<String, DispatchDefinition>,
+    pub(crate) digest: DispatchConfigDigest,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,21 +130,6 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), String> {
-        for (name, definition) in &self.dispatches {
-            if name.is_empty() {
-                return Err("dispatch name must not be empty".to_owned());
-            }
-            if name.chars().any(char::is_whitespace) {
-                return Err(format!(
-                    "dispatch name '{name}' must not contain whitespace"
-                ));
-            }
-            if definition.command.is_empty() {
-                return Err(format!("dispatch '{name}' command must not be empty"));
-            }
-            validate_template(&definition.command, TemplateKind::Dispatch(name))?;
-        }
-
         if let Some(command) = &self.dispatch.generate_branch_name_command {
             if command.is_empty() {
                 return Err("generate_branch_name_command must not be empty".to_owned());
@@ -171,6 +170,56 @@ impl Config {
             }),
         }
     }
+}
+
+pub(crate) fn load_repository_dispatch_config(
+    worktree_path: &Path,
+) -> Result<Option<LoadedDispatchConfig>, ConfigError> {
+    let path = worktree_path.join(".refdo.toml");
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ConfigError::Read { path, source });
+        }
+    };
+    let digest = Sha256::digest(contents.as_bytes()).into();
+    let config: RepositoryDispatchConfig =
+        toml::from_str(&contents).map_err(|source| ConfigError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+    validate_dispatch_definitions(&config.dispatches).map_err(|message| {
+        ConfigError::Validation {
+            path: path.clone(),
+            message,
+        }
+    })?;
+    Ok(Some(LoadedDispatchConfig {
+        dispatches: config.dispatches,
+        digest,
+    }))
+}
+
+fn validate_dispatch_definitions(
+    dispatches: &BTreeMap<String, DispatchDefinition>,
+) -> Result<(), String> {
+    for (name, definition) in dispatches {
+        if name.is_empty() {
+            return Err("dispatch name must not be empty".to_owned());
+        }
+        if name.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "dispatch name '{name}' must not contain whitespace"
+            ));
+        }
+        if definition.command.is_empty() {
+            return Err(format!("dispatch '{name}' command must not be empty"));
+        }
+        validate_template(&definition.command, TemplateKind::Dispatch(name))?;
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -401,6 +450,18 @@ mod tests {
         "dark = \"tokyo-night\"\n",
         "mode = \"system\"\n",
     );
+    const REPOSITORY_CONFIG: &str = concat!(
+        "[dispatches.implement]\n",
+        "command = './scripts/implement.sh {{BRANCH}} omp {{CONTENT}}'\n",
+        "\n",
+        "[dispatches.report]\n",
+        "command = './scripts/report.sh {{CONTENT}}'\n",
+    );
+    const REPOSITORY_CONFIG_DIGEST: DispatchConfigDigest = [
+        0x66, 0x4e, 0x6b, 0x97, 0x8f, 0x49, 0x4f, 0xd8, 0x4f, 0xef, 0x22, 0xdb, 0xc0, 0x0a, 0xee,
+        0x22, 0x39, 0x67, 0x09, 0x07, 0x4a, 0xd6, 0x40, 0x30, 0x24, 0x42, 0x91, 0xcb, 0x31, 0xbc,
+        0x3f, 0x4e,
+    ];
 
     struct TestDirectory(PathBuf);
 
@@ -417,6 +478,10 @@ mod tests {
         fn config_path(&self) -> PathBuf {
             self.0.join(APP_DIRECTORY).join(CONFIG_FILE)
         }
+
+        fn repository_config_path(&self) -> PathBuf {
+            self.0.join(".refdo.toml")
+        }
     }
 
     impl Drop for TestDirectory {
@@ -425,30 +490,33 @@ mod tests {
         }
     }
 
-    fn write_config(path: &Path, contents: &str) {
+    fn write_file(path: &Path, contents: impl AsRef<[u8]>) {
         fs::create_dir_all(path.parent().expect("test config path has a parent")).unwrap();
         fs::write(path, contents).unwrap();
     }
 
     fn assert_parse_error(path: &Path, error: ConfigError) {
-        assert!(matches!(error, ConfigError::Parse { .. }));
+        match &error {
+            ConfigError::Parse {
+                path: error_path,
+                source,
+            } => {
+                assert_eq!(error_path, path);
+                assert!(!source.to_string().is_empty());
+            }
+            other => panic!("expected parse error, got {other:?}"),
+        }
         assert!(error.to_string().contains(&path.display().to_string()));
         assert!(error.source().is_some());
     }
 
-    fn assert_validation_error(extra: &str, expected_message: &str) {
-        let directory = TestDirectory::new();
-        let path = directory.config_path();
-        write_config(&path, &format!("{THEME_CONFIG}\n{extra}"));
-
-        let error = Config::load_from(&path).unwrap_err();
-
+    fn assert_validation_error(path: &Path, error: ConfigError, expected_message: &str) {
         match &error {
             ConfigError::Validation {
                 path: error_path,
                 message,
             } => {
-                assert_eq!(error_path, &path);
+                assert_eq!(error_path, path);
                 assert_eq!(message, expected_message);
             }
             other => panic!("expected validation error, got {other:?}"),
@@ -463,11 +531,26 @@ mod tests {
         assert!(error.source().is_none());
     }
 
+    fn assert_global_validation_error(extra: &str, expected_message: &str) {
+        let directory = TestDirectory::new();
+        let path = directory.config_path();
+        write_file(&path, format!("{THEME_CONFIG}\n{extra}"));
+        let error = Config::load_from(&path).unwrap_err();
+        assert_validation_error(&path, error, expected_message);
+    }
+
+    fn assert_repository_validation_error(contents: &str, expected_message: &str) {
+        let directory = TestDirectory::new();
+        let path = directory.repository_config_path();
+        write_file(&path, contents);
+        let error = load_repository_dispatch_config(&directory.0).unwrap_err();
+        assert_validation_error(&path, error, expected_message);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_config_path_uses_home_dot_config() {
         let base_dirs = BaseDirs::new().unwrap();
-
         assert_eq!(
             config_path(&base_dirs),
             base_dirs
@@ -479,16 +562,14 @@ mod tests {
     }
 
     #[test]
-    fn loads_valid_config() {
+    fn loads_theme_only_global_config() {
         let directory = TestDirectory::new();
         let path = directory.config_path();
-        write_config(
+        write_file(
             &path,
             "[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"dark\"\n",
         );
-
         let config = Config::load_from(&path).unwrap();
-
         assert_eq!(
             config,
             Config {
@@ -498,20 +579,17 @@ mod tests {
                     mode: ThemeMode::Dark,
                 },
                 dispatch: DispatchSettings::default(),
-                dispatches: BTreeMap::new(),
             }
         );
     }
 
     #[test]
-    fn creates_a_missing_default_file_and_reloads_it() {
+    fn creates_and_reloads_theme_only_default_global_file() {
         let directory = TestDirectory::new();
         let path = directory.config_path();
-
         let created = Config::load_from(&path).unwrap();
         let emitted = fs::read_to_string(&path).unwrap();
         let reloaded = Config::load_from(&path).unwrap();
-
         assert_eq!(created, Config::default());
         assert_eq!(reloaded, created);
         assert!(emitted.contains("[theme]"));
@@ -523,107 +601,29 @@ mod tests {
     }
 
     #[test]
-    fn loads_named_dispatches_and_branch_generator() {
+    fn loads_global_branch_generator() {
         let directory = TestDirectory::new();
         let path = directory.config_path();
-        let dispatch_config = concat!(
-            "[dispatch]\n",
-            "generate_branch_name_command = 'omp --model gemini-3.7-flash --thinking low \"Create a git branch name for the following todo item:\" {{CONTENT}}'\n",
-            "\n",
-            "[dispatches.implement]\n",
-            "command = './scripts/implement.sh {{BRANCH}} omp {{CONTENT}}'\n",
-            "\n",
-            "[dispatches.report]\n",
-            "command = './scripts/report.sh {{CONTENT}}'\n",
+        let command = concat!(
+            "omp --model gemini-3.7-flash --thinking low ",
+            "\"Create a git branch name for the following todo item:\" {{CONTENT}}",
         );
-        write_config(&path, &format!("{THEME_CONFIG}\n{dispatch_config}"));
-
+        write_file(
+            &path,
+            format!(
+                "{THEME_CONFIG}\n[dispatch]\ngenerate_branch_name_command = {}\n",
+                toml::Value::String(command.to_owned())
+            ),
+        );
         let config = Config::load_from(&path).unwrap();
-
         assert_eq!(
             config.dispatch.generate_branch_name_command.as_deref(),
-            Some(
-                "omp --model gemini-3.7-flash --thinking low \"Create a git branch name for the following todo item:\" {{CONTENT}}"
-            )
-        );
-        assert_eq!(
-            config.dispatches["implement"].command,
-            "./scripts/implement.sh {{BRANCH}} omp {{CONTENT}}"
-        );
-        assert_eq!(
-            config.dispatches["report"].command,
-            "./scripts/report.sh {{CONTENT}}"
+            Some(command)
         );
     }
 
     #[test]
-    fn rejects_invalid_dispatch_names_and_empty_commands() {
-        for (extra, expected) in [
-            (
-                "[dispatches.\"\"]\ncommand = 'echo {{CONTENT}}'\n",
-                "dispatch name must not be empty",
-            ),
-            (
-                "[dispatches.\"two words\"]\ncommand = 'echo {{CONTENT}}'\n",
-                "dispatch name 'two words' must not contain whitespace",
-            ),
-            (
-                "[dispatches.\"two\\twords\"]\ncommand = 'echo {{CONTENT}}'\n",
-                "dispatch name 'two\twords' must not contain whitespace",
-            ),
-            (
-                "[dispatches.empty]\ncommand = ''\n",
-                "dispatch 'empty' command must not be empty",
-            ),
-        ] {
-            assert_validation_error(extra, expected);
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_dispatch_placeholders() {
-        for (command, expected) in [
-            (
-                "echo {{UNKNOWN}}",
-                "dispatch 'run' command contains invalid placeholder '{{UNKNOWN}}'",
-            ),
-            (
-                "echo {{CONTENT}",
-                "dispatch 'run' command contains invalid placeholder '{{CONTENT}'",
-            ),
-            (
-                "echo }}",
-                "dispatch 'run' command contains invalid placeholder '}}'",
-            ),
-            (
-                "echo '{{CONTENT}}'",
-                "dispatch 'run' placeholder '{{CONTENT}}' must not be quoted",
-            ),
-            (
-                "echo \"{{BRANCH}}\"",
-                "dispatch 'run' placeholder '{{BRANCH}}' must not be quoted",
-            ),
-            (
-                "echo `{{CONTENT}}`",
-                "dispatch 'run' placeholder '{{CONTENT}}' must not be quoted",
-            ),
-            (
-                "echo \\{{CONTENT}}",
-                "dispatch 'run' placeholder '{{CONTENT}}' must not be quoted",
-            ),
-        ] {
-            assert_validation_error(
-                &format!(
-                    "[dispatches.run]\ncommand = {}\n",
-                    toml::Value::String(command.to_owned())
-                ),
-                expected,
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_branch_generators() {
+    fn rejects_invalid_global_branch_generators() {
         for (command, expected) in [
             ("", "generate_branch_name_command must not be empty"),
             (
@@ -655,7 +655,7 @@ mod tests {
                 "generate_branch_name_command placeholder '{{CONTENT}}' must not be quoted",
             ),
         ] {
-            assert_validation_error(
+            assert_global_validation_error(
                 &format!(
                     "[dispatch]\ngenerate_branch_name_command = {}\n",
                     toml::Value::String(command.to_owned())
@@ -666,44 +666,234 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_toml_with_path_and_cause() {
+    fn global_dispatch_definitions_are_rejected_with_path_and_cause() {
+        for extra in [
+            "[dispatches]\n",
+            "[dispatches.run]\ncommand = 'echo {{CONTENT}}'\n",
+        ] {
+            let directory = TestDirectory::new();
+            let path = directory.config_path();
+            write_file(&path, format!("{THEME_CONFIG}\n{extra}"));
+            let error = Config::load_from(&path).unwrap_err();
+            assert_parse_error(&path, error);
+        }
+    }
+
+    #[test]
+    fn missing_repository_config_returns_none_without_creating_a_file() {
         let directory = TestDirectory::new();
-        let path = directory.config_path();
-        write_config(&path, "[theme\n");
+        let path = directory.repository_config_path();
+        let loaded = load_repository_dispatch_config(&directory.0).unwrap();
+        assert_eq!(loaded, None);
+        assert!(!path.exists());
+    }
 
-        let error = Config::load_from(&path).unwrap_err();
+    #[test]
+    fn loads_repository_dispatches_with_digest_of_exact_source_bytes() {
+        let directory = TestDirectory::new();
+        let path = directory.repository_config_path();
+        write_file(&path, REPOSITORY_CONFIG);
+        let loaded = load_repository_dispatch_config(&directory.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.digest, REPOSITORY_CONFIG_DIGEST);
+        assert_eq!(
+            loaded.dispatches["implement"].command,
+            "./scripts/implement.sh {{BRANCH}} omp {{CONTENT}}"
+        );
+        assert_eq!(
+            loaded.dispatches["report"].command,
+            "./scripts/report.sh {{CONTENT}}"
+        );
+    }
 
-        assert_parse_error(&path, error);
+    #[test]
+    fn repository_digest_is_content_based_and_whitespace_sensitive() {
+        let first = TestDirectory::new();
+        let second = TestDirectory::new();
+        let changed = TestDirectory::new();
+        write_file(&first.repository_config_path(), REPOSITORY_CONFIG);
+        write_file(&second.repository_config_path(), REPOSITORY_CONFIG);
+        write_file(
+            &changed.repository_config_path(),
+            format!("{REPOSITORY_CONFIG}\n"),
+        );
+        let first_digest = load_repository_dispatch_config(&first.0)
+            .unwrap()
+            .unwrap()
+            .digest;
+        let second_digest = load_repository_dispatch_config(&second.0)
+            .unwrap()
+            .unwrap()
+            .digest;
+        let changed_digest = load_repository_dispatch_config(&changed.0)
+            .unwrap()
+            .unwrap()
+            .digest;
+        assert_eq!(first_digest, second_digest);
+        assert_ne!(first_digest, changed_digest);
+    }
+
+    #[test]
+    fn rejects_invalid_repository_dispatch_names_and_empty_commands() {
+        for (contents, expected) in [
+            (
+                "[dispatches.\"\"]\ncommand = 'echo {{CONTENT}}'\n",
+                "dispatch name must not be empty",
+            ),
+            (
+                "[dispatches.\"two words\"]\ncommand = 'echo {{CONTENT}}'\n",
+                "dispatch name 'two words' must not contain whitespace",
+            ),
+            (
+                "[dispatches.\"two\\twords\"]\ncommand = 'echo {{CONTENT}}'\n",
+                "dispatch name 'two\twords' must not contain whitespace",
+            ),
+            (
+                "[dispatches.empty]\ncommand = ''\n",
+                "dispatch 'empty' command must not be empty",
+            ),
+        ] {
+            assert_repository_validation_error(contents, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_repository_dispatch_placeholders() {
+        for (command, expected) in [
+            (
+                "echo {{UNKNOWN}}",
+                "dispatch 'run' command contains invalid placeholder '{{UNKNOWN}}'",
+            ),
+            (
+                "echo {{CONTENT}",
+                "dispatch 'run' command contains invalid placeholder '{{CONTENT}'",
+            ),
+            (
+                "echo }}",
+                "dispatch 'run' command contains invalid placeholder '}}'",
+            ),
+            (
+                "echo '{{CONTENT}}'",
+                "dispatch 'run' placeholder '{{CONTENT}}' must not be quoted",
+            ),
+            (
+                "echo \"{{BRANCH}}\"",
+                "dispatch 'run' placeholder '{{BRANCH}}' must not be quoted",
+            ),
+            (
+                "echo `{{CONTENT}}`",
+                "dispatch 'run' placeholder '{{CONTENT}}' must not be quoted",
+            ),
+            (
+                "echo \\{{CONTENT}}",
+                "dispatch 'run' placeholder '{{CONTENT}}' must not be quoted",
+            ),
+        ] {
+            assert_repository_validation_error(
+                &format!(
+                    "[dispatches.run]\ncommand = {}\n",
+                    toml::Value::String(command.to_owned())
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_global_and_repository_toml_with_path_and_cause() {
+        let global = TestDirectory::new();
+        let global_path = global.config_path();
+        write_file(&global_path, "[theme\n");
+        assert_parse_error(&global_path, Config::load_from(&global_path).unwrap_err());
+        let repository = TestDirectory::new();
+        let repository_path = repository.repository_config_path();
+        write_file(&repository_path, "[dispatches.run\n");
+        assert_parse_error(
+            &repository_path,
+            load_repository_dispatch_config(&repository.0).unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn rejects_non_utf8_repository_config_as_a_read_error() {
+        let directory = TestDirectory::new();
+        let path = directory.repository_config_path();
+        write_file(&path, [0xff]);
+        let error = load_repository_dispatch_config(&directory.0).unwrap_err();
+        match &error {
+            ConfigError::Read {
+                path: error_path,
+                source,
+            } => {
+                assert_eq!(error_path, &path);
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected read error, got {other:?}"),
+        }
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn rejects_directory_at_repository_config_path_as_a_read_error() {
+        let directory = TestDirectory::new();
+        let path = directory.repository_config_path();
+        fs::create_dir_all(&path).unwrap();
+        let error = load_repository_dispatch_config(&directory.0).unwrap_err();
+        match &error {
+            ConfigError::Read {
+                path: error_path,
+                source,
+            } => {
+                assert_eq!(error_path, &path);
+                assert_ne!(source.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("expected read error, got {other:?}"),
+        }
+        assert!(error.source().is_some());
     }
 
     #[test]
     fn rejects_invalid_theme_mode_with_path_and_cause() {
         let directory = TestDirectory::new();
         let path = directory.config_path();
-        write_config(
+        write_file(
             &path,
             "[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"automatic\"\n",
         );
-
         let error = Config::load_from(&path).unwrap_err();
-
         assert_parse_error(&path, error);
     }
 
     #[test]
-    fn rejects_unknown_keys_at_each_level() {
+    fn global_schema_rejects_unknown_keys_at_every_level() {
         for contents in [
             "extra = true\n[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"system\"\n",
             "[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"system\"\nextra = true\n",
             "[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"system\"\n[dispatch]\nextra = true\n",
-            "[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"system\"\n[dispatches.run]\ncommand = \"echo\"\nextra = true\n",
+            "[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"system\"\n[dispatches]\n",
+            "[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"system\"\n[dispatches.run]\ncommand = \"echo\"\n",
         ] {
             let directory = TestDirectory::new();
             let path = directory.config_path();
-            write_config(&path, contents);
-
+            write_file(&path, contents);
             let error = Config::load_from(&path).unwrap_err();
+            assert_parse_error(&path, error);
+        }
+    }
 
+    #[test]
+    fn repository_schema_rejects_unknown_keys_at_every_level() {
+        for contents in [
+            "extra = true\n",
+            "[theme]\nlight = \"tokyo-night-day\"\ndark = \"tokyo-night\"\nmode = \"system\"\n",
+            "[dispatch]\ngenerate_branch_name_command = 'echo {{CONTENT}}'\n",
+            "[dispatches.run]\ncommand = 'echo {{CONTENT}}'\nextra = true\n",
+        ] {
+            let directory = TestDirectory::new();
+            let path = directory.repository_config_path();
+            write_file(&path, contents);
+            let error = load_repository_dispatch_config(&directory.0).unwrap_err();
             assert_parse_error(&path, error);
         }
     }

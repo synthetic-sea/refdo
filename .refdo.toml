@@ -1,0 +1,2 @@
+[dispatches.implement]
+command = './scripts/implement.sh {{BRANCH}} omp {{CONTENT}}'

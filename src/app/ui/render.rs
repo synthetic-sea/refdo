@@ -56,7 +56,7 @@ pub(in crate::app) fn render_footer(
     frame: &mut Frame,
     area: Rect,
     mode: &Mode,
-    error: Option<&str>,
+    message: Option<&str>,
     theme: &Theme,
 ) {
     let footer_style = Style::default()
@@ -85,11 +85,11 @@ pub(in crate::app) fn render_footer(
             .bg(theme.mode_background)
             .add_modifier(Modifier::BOLD),
     );
-    let error = error
+    let message = message
         .map(|message| Span::styled(format!(" {message}"), Style::default().fg(theme.foreground)))
         .unwrap_or_default();
     frame.render_widget(
-        Paragraph::new(Line::from(vec![mode, error])).style(footer_style),
+        Paragraph::new(Line::from(vec![mode, message])).style(footer_style),
         area,
     );
 }

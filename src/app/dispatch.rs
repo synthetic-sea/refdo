@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     path::PathBuf,
     process::{Command, Output},
     sync::mpsc::{self, Receiver, Sender},
@@ -17,7 +16,6 @@ pub(super) struct DispatchResult {
 
 pub(super) struct DispatchController {
     settings: DispatchSettings,
-    definitions: BTreeMap<String, DispatchDefinition>,
     sender: Sender<DispatchResult>,
     receiver: Receiver<DispatchResult>,
     running: bool,
@@ -25,19 +23,15 @@ pub(super) struct DispatchController {
 
 impl Default for DispatchController {
     fn default() -> Self {
-        Self::new(DispatchSettings::default(), BTreeMap::new())
+        Self::new(DispatchSettings::default())
     }
 }
 
 impl DispatchController {
-    pub(super) fn new(
-        settings: DispatchSettings,
-        definitions: BTreeMap<String, DispatchDefinition>,
-    ) -> Self {
+    pub(super) fn new(settings: DispatchSettings) -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
             settings,
-            definitions,
             sender,
             receiver,
             running: false,
@@ -47,17 +41,13 @@ impl DispatchController {
     pub(super) fn start(
         &mut self,
         name: &str,
+        definition: DispatchDefinition,
         content: String,
         worktree_path: PathBuf,
     ) -> Result<(), String> {
         if self.running {
             return Err("dispatch: another dispatch is already running".to_owned());
         }
-        let definition = self
-            .definitions
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("dispatch: unknown dispatch '{name}'"))?;
 
         let needs_branch = definition.command.contains("{{BRANCH}}");
         let generator = if needs_branch {
@@ -259,22 +249,38 @@ mod tests {
         }
     }
 
-    fn definition(command: &str) -> BTreeMap<String, DispatchDefinition> {
-        BTreeMap::from([(
-            "implement".to_owned(),
-            DispatchDefinition {
-                command: command.to_owned(),
-            },
-        )])
+    fn definition(command: &str) -> DispatchDefinition {
+        DispatchDefinition {
+            command: command.to_owned(),
+        }
     }
 
-    fn controller(command: &str, generator: Option<&str>) -> DispatchController {
-        DispatchController::new(
-            DispatchSettings {
+    struct TestController {
+        controller: DispatchController,
+        definition: DispatchDefinition,
+    }
+
+    impl std::ops::Deref for TestController {
+        type Target = DispatchController;
+
+        fn deref(&self) -> &Self::Target {
+            &self.controller
+        }
+    }
+
+    impl std::ops::DerefMut for TestController {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.controller
+        }
+    }
+
+    fn controller(command: &str, generator: Option<&str>) -> TestController {
+        TestController {
+            controller: DispatchController::new(DispatchSettings {
                 generate_branch_name_command: generator.map(str::to_owned),
-            },
-            definition(command),
-        )
+            }),
+            definition: definition(command),
+        }
     }
 
     fn wait_for_result(controller: &mut DispatchController) -> DispatchResult {
@@ -289,12 +295,13 @@ mod tests {
     }
 
     fn start_and_wait(
-        controller: &mut DispatchController,
+        controller: &mut TestController,
         content: &str,
         cwd: &Path,
     ) -> Result<(), String> {
+        let definition = controller.definition.clone();
         controller
-            .start("implement", content.to_owned(), cwd.to_owned())
+            .start("implement", definition, content.to_owned(), cwd.to_owned())
             .unwrap();
         wait_for_result(controller).result
     }
@@ -468,12 +475,18 @@ mod tests {
         let directory = TestDirectory::new();
         let mut controller = controller("sleep 0.1", None);
         controller
-            .start("implement", "first".to_owned(), directory.path().to_owned())
+            .start(
+                "implement",
+                definition("sleep 0.1"),
+                "first".to_owned(),
+                directory.path().to_owned(),
+            )
             .unwrap();
 
         assert_eq!(
             controller.start(
                 "implement",
+                definition("sleep 0.1"),
                 "second".to_owned(),
                 directory.path().to_owned()
             ),
@@ -481,7 +494,12 @@ mod tests {
         );
         assert_eq!(wait_for_result(&mut controller).result, Ok(()));
         controller
-            .start("implement", "third".to_owned(), directory.path().to_owned())
+            .start(
+                "implement",
+                definition("sleep 0.1"),
+                "third".to_owned(),
+                directory.path().to_owned(),
+            )
             .unwrap();
         assert_eq!(wait_for_result(&mut controller).result, Ok(()));
     }
@@ -492,7 +510,12 @@ mod tests {
         let mut controller = controller("printf '%s' {{BRANCH}}", None);
 
         assert_eq!(
-            controller.start("implement", "todo".to_owned(), directory.path().to_owned()),
+            controller.start(
+                "implement",
+                definition("printf '%s' {{BRANCH}}"),
+                "todo".to_owned(),
+                directory.path().to_owned(),
+            ),
             Err(
                 "dispatch: 'implement' requires {{BRANCH}}, but no branch generator is configured"
                     .to_owned()

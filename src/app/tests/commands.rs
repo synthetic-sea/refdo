@@ -271,7 +271,7 @@ fn clear_requires_confirmation_and_enter_cancels_without_deleting() {
 
     assert!(matches!(
         &app.mode,
-        Mode::ConfirmClear(ClearConfirmation { target_branch })
+        Mode::ConfirmClear(ClearConfirmation { target_branch, .. })
             if target_branch == "refs/heads/main"
     ));
     assert_eq!(app.todos, before);
@@ -792,4 +792,287 @@ fn dispatch_surfaces_async_failure_in_footer() {
 
     assert_eq!(app.error.as_deref(), Some("dispatch: running 'fail'"));
     wait_for_dispatch_footer(&mut app, "dispatch: 'fail' failed: fixture failed");
+}
+
+#[test]
+fn dispatch_loads_selected_worktree_config_and_reports_missing_or_malformed_files() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_sections(vec![main]);
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+
+    run_command(&mut app, "dispatch known");
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: selected todo's worktree has no .refdo.toml")
+    );
+
+    fs::write(directory.path().join(".refdo.toml"), "[dispatches.known").unwrap();
+    run_command(&mut app, "dispatch known");
+    assert!(
+        app.error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("dispatch: invalid configuration in "))
+    );
+}
+
+#[test]
+fn untrusted_dispatch_never_spawns_and_persistence_is_required_before_config_read() {
+    let directory = TestDirectory::new();
+    let marker = directory.path().join("spawned");
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_sections(vec![main]);
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+    write_dispatch_config(
+        directory.path(),
+        &[("known", &format!("touch {}", marker.display()))],
+    );
+
+    run_command(&mut app, "dispatch known");
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: repository configuration is untrusted; run :dispatch-trust")
+    );
+    assert!(!marker.exists());
+
+    fs::remove_file(directory.path().join(".refdo.toml")).unwrap();
+    app.persistence_available = false;
+    for command in ["dispatch known", "dispatch-trust"] {
+        run_command(&mut app, command);
+        assert_eq!(
+            app.error.as_deref(),
+            Some("dispatch: repository trust unavailable")
+        );
+    }
+}
+
+#[test]
+fn dispatch_trust_validates_arity_selection_and_nonempty_definition_map() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_sections(vec![main]);
+
+    run_command(&mut app, "dispatch-trust extra");
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch-trust: expected :dispatch-trust")
+    );
+    run_command(&mut app, "dispatch-trust");
+    assert_eq!(app.error.as_deref(), Some("dispatch: no todo selected"));
+
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+    fs::write(directory.path().join(".refdo.toml"), "").unwrap();
+    run_command(&mut app, "dispatch-trust");
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: .refdo.toml defines no dispatches")
+    );
+}
+
+#[test]
+fn dispatch_trust_confirmation_is_mode_owned_and_cancel_keys_do_not_trust() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_sections(vec![main]);
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+    let digest = write_dispatch_config(directory.path(), &[("known", "true")]);
+
+    for cancel in [
+        KeyCode::Char('n'),
+        KeyCode::Char('N'),
+        KeyCode::Enter,
+        KeyCode::Esc,
+    ] {
+        run_command(&mut app, "dispatch-trust");
+        let Mode::ConfirmDispatchTrust(confirmation) = &app.mode else {
+            panic!("expected dispatch trust confirmation");
+        };
+        assert_eq!(
+            confirmation.prompt,
+            "dispatch: trust .refdo.toml from main? [y/N]"
+        );
+        app.error = Some("deferred notification".to_owned());
+        let backend = TestBackend::new(70, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(row_text(&terminal, 5).contains("dispatch: trust .refdo.toml from main? [y/N]"));
+        app.handle_key_event(key(cancel));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(!app.store.is_dispatch_config_trusted(&digest).unwrap());
+    }
+
+    run_command(&mut app, "dispatch-trust");
+    app.handle_key_event(modified_key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert!(matches!(app.mode, Mode::ConfirmDispatchTrust(_)));
+}
+
+#[test]
+fn dispatch_trust_persists_after_revalidation_and_reports_already_trusted() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_sections(vec![main]);
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+    let digest = write_dispatch_config(directory.path(), &[("known", "true")]);
+
+    run_command(&mut app, "dispatch-trust");
+    app.handle_key_event(key(KeyCode::Char('y')));
+
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: trusted .refdo.toml for main")
+    );
+    assert!(app.store.is_dispatch_config_trusted(&digest).unwrap());
+
+    run_command(&mut app, "dispatch-trust");
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: .refdo.toml is already trusted for main")
+    );
+}
+
+#[test]
+fn dispatch_trust_revalidation_rejects_changed_config_and_trusts_neither_digest() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_sections(vec![main]);
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+    let captured = write_dispatch_config(directory.path(), &[("known", "true")]);
+
+    run_command(&mut app, "dispatch-trust");
+    let replacement = write_dispatch_config(directory.path(), &[("known", "printf changed")]);
+    app.handle_key_event(key(KeyCode::Char('y')));
+
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: .refdo.toml changed; run :dispatch-trust again")
+    );
+    assert!(!app.store.is_dispatch_config_trusted(&captured).unwrap());
+    assert!(!app.store.is_dispatch_config_trusted(&replacement).unwrap());
+}
+#[test]
+fn dispatch_trust_revalidation_rejects_missing_invalid_and_empty_configs() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_sections(vec![main]);
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+
+    for replacement in [None, Some("[dispatches.known"), Some("")] {
+        let captured = write_dispatch_config(directory.path(), &[("known", "true")]);
+        run_command(&mut app, "dispatch-trust");
+        match replacement {
+            Some(contents) => {
+                fs::write(directory.path().join(".refdo.toml"), contents).unwrap();
+            }
+            None => fs::remove_file(directory.path().join(".refdo.toml")).unwrap(),
+        }
+        app.handle_key_event(key(KeyCode::Char('y')));
+
+        let error = app.error.as_deref().unwrap();
+        match replacement {
+            None => assert_eq!(
+                error,
+                "dispatch: selected todo's worktree has no .refdo.toml"
+            ),
+            Some("") => assert_eq!(error, "dispatch: .refdo.toml defines no dispatches"),
+            Some(_) => assert!(error.starts_with("dispatch: invalid configuration in ")),
+        }
+        assert!(!app.store.is_dispatch_config_trusted(&captured).unwrap());
+    }
+}
+
+#[test]
+fn every_config_byte_change_requires_new_trust_before_dispatch() {
+    let directory = TestDirectory::new();
+    let marker = directory.path().join("ran");
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(vec![main], "known", &format!("touch {}", marker.display()));
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+    let mut contents = fs::read_to_string(directory.path().join(".refdo.toml")).unwrap();
+    contents.push_str("\n# changed bytes\n");
+    fs::write(directory.path().join(".refdo.toml"), contents).unwrap();
+
+    run_command(&mut app, "dispatch known");
+
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: repository configuration is untrusted; run :dispatch-trust")
+    );
+    assert!(!marker.exists());
+
+    run_command(&mut app, "dispatch-trust");
+    app.handle_key_event(key(KeyCode::Char('y')));
+    run_command(&mut app, "dispatch known");
+    wait_for_dispatch_footer(&mut app, "dispatch: 'known' completed");
+    assert!(marker.exists());
+}
+
+#[test]
+fn dispatch_completion_does_not_hide_or_disarm_trust_confirmation() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(vec![main], "slow", "sleep 0.1");
+    insert_and_focus_todo(&mut app, "refs/heads/main", "selected");
+    run_command(&mut app, "dispatch slow");
+
+    write_dispatch_config(directory.path(), &[("next", "true")]);
+    run_command(&mut app, "dispatch-trust");
+    assert!(matches!(app.mode, Mode::ConfirmDispatchTrust(_)));
+    wait_for_dispatch_footer(&mut app, "dispatch: 'slow' completed");
+
+    let backend = TestBackend::new(70, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(row_text(&terminal, 5).contains("dispatch: trust .refdo.toml from main? [y/N]"));
+    app.handle_key_event(key(KeyCode::Char('n')));
+    assert!(matches!(app.mode, Mode::Normal));
+}
+
+#[test]
+fn selected_worktree_owns_its_dispatch_definition() {
+    let main_directory = TestDirectory::new();
+    let feature_directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = main_directory.path().to_owned();
+    let mut feature = section("feature");
+    feature.worktree_path = feature_directory.path().to_owned();
+    let mut app = app_with_sections(vec![main, feature]);
+    let main_digest = write_dispatch_config(
+        main_directory.path(),
+        &[("record", "printf main > dispatch-owner")],
+    );
+    let feature_digest = write_dispatch_config(
+        feature_directory.path(),
+        &[("record", "printf feature > dispatch-owner")],
+    );
+    trust_dispatch_config(&app, &main_digest);
+    trust_dispatch_config(&app, &feature_digest);
+    let main_todo = insert_and_focus_todo(&mut app, "refs/heads/main", "main todo");
+    let feature_todo = app
+        .store
+        .insert_todo("refs/heads/feature", "feature todo", None)
+        .unwrap();
+    app.reload();
+
+    for (todo, expected, directory) in [
+        (main_todo, "main", main_directory.path()),
+        (feature_todo.id, "feature", feature_directory.path()),
+    ] {
+        app.focus = Some(Focus::Todo(todo));
+        run_command(&mut app, "dispatch record");
+        wait_for_dispatch_footer(&mut app, "dispatch: 'record' completed");
+        assert_eq!(
+            fs::read_to_string(directory.join("dispatch-owner")).unwrap(),
+            expected
+        );
+    }
 }

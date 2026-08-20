@@ -361,6 +361,23 @@ impl TodoStore {
         transaction.commit()?;
         Ok(todo)
     }
+    pub fn is_dispatch_config_trusted(&self, digest: &[u8; 32]) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM trusted_dispatch_configs WHERE digest = ?1
+            )",
+            [digest.as_slice()],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn trust_dispatch_config(&self, digest: &[u8; 32]) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO trusted_dispatch_configs (digest) VALUES (?1)",
+            [digest.as_slice()],
+        )?;
+        Ok(())
+    }
 
     pub fn data_version(&self) -> Result<i64, StoreError> {
         Ok(self
@@ -414,12 +431,12 @@ fn configure_connection(connection: &Connection, file_backed: bool) -> Result<()
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
-    const SCHEMA_VERSION: i64 = 1;
+    const SCHEMA_VERSION: i64 = 2;
 
     let version = connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
     match version {
         SCHEMA_VERSION => return Ok(()),
-        0 => {}
+        0 | 1 => {}
         version => return Err(StoreError::UnsupportedSchemaVersion(version)),
     }
 
@@ -439,7 +456,20 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
                     UNIQUE (branch_ref, sort_order)
                 );
-                PRAGMA user_version = 1;",
+                CREATE TABLE trusted_dispatch_configs (
+                    digest BLOB PRIMARY KEY CHECK (length(digest) = 32),
+                    trusted_at INTEGER NOT NULL DEFAULT (unixepoch())
+                );
+                PRAGMA user_version = 2;",
+            )?;
+        }
+        1 => {
+            transaction.execute_batch(
+                "CREATE TABLE trusted_dispatch_configs (
+                    digest BLOB PRIMARY KEY CHECK (length(digest) = 32),
+                    trusted_at INTEGER NOT NULL DEFAULT (unixepoch())
+                );
+                PRAGMA user_version = 2;",
             )?;
         }
         version => return Err(StoreError::UnsupportedSchemaVersion(version)),
@@ -1019,6 +1049,96 @@ mod tests {
         let reopened = TodoStore::open(database.path()).unwrap();
         let todos = reopened.load_all().unwrap();
         assert_eq!(todos, vec![inserted]);
+    }
+
+    #[test]
+    fn dispatch_config_trust_is_separated_by_digest() {
+        let store = TodoStore::open_in_memory().unwrap();
+        let trusted_digest = [0x11; 32];
+        let other_digest = [0x22; 32];
+
+        assert!(!store.is_dispatch_config_trusted(&trusted_digest).unwrap());
+        assert!(!store.is_dispatch_config_trusted(&other_digest).unwrap());
+
+        store.trust_dispatch_config(&trusted_digest).unwrap();
+
+        assert!(store.is_dispatch_config_trusted(&trusted_digest).unwrap());
+        assert!(!store.is_dispatch_config_trusted(&other_digest).unwrap());
+    }
+
+    #[test]
+    fn trusting_a_dispatch_config_is_idempotent() {
+        let store = TodoStore::open_in_memory().unwrap();
+        let digest = [0x33; 32];
+
+        store.trust_dispatch_config(&digest).unwrap();
+        store.trust_dispatch_config(&digest).unwrap();
+
+        let count = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM trusted_dispatch_configs WHERE digest = ?1",
+                [digest.as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn dispatch_config_trust_persists_when_the_database_is_reopened() {
+        let database = TemporaryDatabase::new();
+        let digest = [0x44; 32];
+        {
+            let store = TodoStore::open(database.path()).unwrap();
+            store.trust_dispatch_config(&digest).unwrap();
+        }
+
+        let reopened = TodoStore::open(database.path()).unwrap();
+        assert!(reopened.is_dispatch_config_trusted(&digest).unwrap());
+    }
+
+    #[test]
+    fn migrates_schema_v1_without_losing_todos() {
+        let database = TemporaryDatabase::new();
+        fs::create_dir_all(database.path().parent().unwrap()).unwrap();
+        {
+            let connection = rusqlite::Connection::open(database.path()).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE todos (
+                        id INTEGER PRIMARY KEY,
+                        branch_ref TEXT NOT NULL,
+                        title TEXT NOT NULL CHECK (length(title) > 0 AND title = trim(title)),
+                        completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+                        sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+                        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                        UNIQUE (branch_ref, sort_order)
+                    );
+                    INSERT INTO todos (id, branch_ref, title, completed, sort_order)
+                    VALUES (17, 'refs/heads/legacy', 'preserved', 1, 0);
+                    PRAGMA user_version = 1;",
+                )
+                .unwrap();
+        }
+
+        let store = TodoStore::open(database.path()).unwrap();
+
+        let todos = store.load_all().unwrap();
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].id, 17);
+        assert_eq!(todos[0].branch_ref, "refs/heads/legacy");
+        assert_eq!(todos[0].title, "preserved");
+        assert!(todos[0].completed);
+        assert_eq!(todos[0].sort_order, 0);
+        assert!(!store.is_dispatch_config_trusted(&[0x55; 32]).unwrap());
+        assert_eq!(
+            store
+                .connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
     }
 
     #[test]

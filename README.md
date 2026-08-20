@@ -83,6 +83,7 @@ The built-in commands affect the selected todo's branch, or the selected branch 
 | `:group` | Put incomplete todos before completed todos while preserving the current order within each group. |
 | `:clear` | Ask for confirmation, then delete every todo in the affected branch. |
 | `:dispatch <name>` | Run the configured named dispatch for the selected todo. |
+| `:dispatch-trust` | Review and approve the selected todo's committed `.refdo.toml`. |
 
 When confirmation is shown, press `y` or `Y` to confirm. Press `n`, `N`, `Enter`, or `Esc` to cancel.
 
@@ -111,7 +112,7 @@ mode = "system"
 
 ### Named dispatches
 
-Named dispatches are Bash commands loaded from `config.toml` when refdo starts. Configuration changes take effect only after restarting refdo. The dispatch configuration is global, while relative command paths are resolved from the selected todo's worktree. This lets every repository provide its own implementation script at the same path.
+Named dispatches are repository capabilities committed in `.refdo.toml` at the repository root. For every `:dispatch` or `:dispatch-trust`, refdo reads the file from the selected todo's worktree; it does not use the worktree from which refdo was launched. Relative command and script paths are also resolved from that selected worktree, so branches may intentionally carry different definitions. Changes are read on demand and do not require restarting refdo.
 
 #### Implementing a todo with OMP, Worktrunk, and Herdr
 
@@ -125,19 +126,23 @@ It requires:
 - `jq`; and
 - Bash, which refdo uses to execute dispatch commands.
 
-Add this to the platform `config.toml` described above:
+Keep the theme and optional branch-name generator in the platform `config.toml` described above. For this example, add the global generator:
 
 ```toml
 [dispatch]
 generate_branch_name_command = "omp -p --no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title --max-time 30s --model gemini-3.7-flash --thinking low --system-prompt 'Generate a Git branch name from the user message. Output exactly one non-empty line and nothing else. The name must pass git check-ref-format --branch. Use lowercase ASCII letters, digits, hyphens, and forward slashes. Prefer a prefix such as feat/, fix/, docs/, refactor/, test/, or chore/. Maximum 60 characters. Do not output Markdown, quotes, explanation, or trailing punctuation.' -- {{CONTENT}}"
+```
 
+Then add the named definition to `.refdo.toml` in the repository root:
+
+```toml
 [dispatches.implement]
 command = './scripts/implement.sh {{BRANCH}} omp {{CONTENT}}'
 ```
 
 The `-p` flag makes OMP process the prompt non-interactively, print its response, and exit. `--no-session` avoids retaining a branch-generation session, while `--no-tools` and the other `--no-*` flags keep this small request isolated from repository tools and customization. `--max-time 30s` prevents the generator from remaining open indefinitely. The `--` before `{{CONTENT}}` ends option parsing, so a todo title beginning with `-` remains input data.
 
-Place the following executable at `scripts/implement.sh` in each repository that supports the `implement` dispatch:
+Place the following executable at `scripts/implement.sh` in the repository:
 
 ```sh
 #!/bin/sh
@@ -207,22 +212,30 @@ Make the script executable:
 chmod +x scripts/implement.sh
 ```
 
-Restart refdo, launch it from the repository in a Herdr workspace terminal, select a todo row, and enter `:dispatch implement`. The global generator receives the todo title and emits a single branch name. refdo then runs the repository's `./scripts/implement.sh` with exactly three arguments: the generated branch name, `omp`, and the literal todo title. The script creates the worktree, opens it in Herdr, and starts OMP in its root pane.
+Commit the definition and the script together so the capability travels with the repository:
+
+```sh
+git add .refdo.toml scripts/implement.sh
+```
+
+On first use, select a todo in the target worktree and enter `:dispatch implement`. When refdo reports that the repository configuration is untrusted, inspect the committed `.refdo.toml`, enter `:dispatch-trust`, and press `y` to confirm. Trusting does not run the dispatch: enter `:dispatch implement` again. The global generator then receives the todo title and emits a single branch name. refdo runs the selected worktree's `./scripts/implement.sh` with exactly three arguments: the generated branch name, `omp`, and the literal todo title. The script creates the worktree, opens it in Herdr, and starts OMP in its root pane.
 
 #### Templates and execution
 
 Dispatch commands support `{{CONTENT}}`, which is the selected todo title, and `{{BRANCH}}`, which is the generator's output. Placeholders must appear unquoted in the configured shell source. refdo replaces them with quoted Bash positional parameters (`"$1"` and `"$2"`), so spaces, quotes, newlines, substitutions, and other shell metacharacters in their values remain data rather than being reparsed as commands.
 
-`generate_branch_name_command` is optional and supports `{{CONTENT}}` but not `{{BRANCH}}`. It runs first, in the selected todo's worktree, only when the selected dispatch contains `{{BRANCH}}`. Its stdout must be valid UTF-8 containing exactly one non-empty line after trimming. A dispatch without `{{BRANCH}}` does not invoke the generator:
+The platform `generate_branch_name_command` is optional and supports `{{CONTENT}}` but not `{{BRANCH}}`. It runs first, in the selected todo's worktree, only when the selected dispatch contains `{{BRANCH}}`. Its stdout must be valid UTF-8 containing exactly one non-empty line after trimming. A dispatch without `{{BRANCH}}` does not invoke the generator; for example, `.refdo.toml` could contain:
 
 ```toml
 [dispatches.notify]
 command = 'printf "%s\n" {{CONTENT}} > dispatch-result.txt'
 ```
 
-A dispatch requires a selected todo whose branch has a worktree. Only one dispatch may run at a time. Execution is asynchronous, so refdo remains interactive while the footer reports running and completion status.
+A dispatch requires a selected todo whose branch has a worktree and an explicitly trusted `.refdo.toml`; missing, invalid, empty, or untrusted repository configuration does not fall back to global definitions. Each distinct SHA-256 hash of the exact `.refdo.toml` bytes must be trusted once. Editing the file—including changing only comments or whitespace—changes the hash and blocks dispatch until the new bytes are trusted, without requiring a refdo restart. Trust is stored in the repository database, so all local worktrees share the set of previously approved hashes.
 
-refdo invokes configured source through `bash -lc`; dispatch configuration is trusted executable code and is not sandboxed. Subprocess stdout and stderr are captured rather than inherited by the TUI: generator stdout supplies the branch name, while dispatch stdout is not displayed. A nonzero process reports the first non-empty stderr line when available or its exit status otherwise; startup, working-directory, and invalid generator-output errors are reported directly.
+Trust approves only the `.refdo.toml` definition bytes. It does not approve, authenticate, or pin scripts and other files that a command invokes transitively. Dispatch definitions execute as unsandboxed, trusted Bash through `bash -lc`, and refdo runs one only after an explicit `:dispatch <name>` invocation; review both the definition and everything it can execute before trusting and invoking it.
+
+Only one dispatch may run at a time. Execution is asynchronous, so refdo remains interactive while the footer reports running and completion status. Subprocess stdout and stderr are captured rather than inherited by the TUI: generator stdout supplies the branch name, while dispatch stdout is not displayed. A nonzero process reports the first non-empty stderr line when available or its exit status otherwise; startup, working-directory, and invalid generator-output errors are reported directly.
 
 ## Storage
 

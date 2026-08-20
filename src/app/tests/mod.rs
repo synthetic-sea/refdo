@@ -10,7 +10,7 @@ use super::{
     App, ClearConfirmation, CommandLine, DispatchController, Editor, EditorTarget, Focus, Mode,
     UNKNOWN_DATA_VERSION,
 };
-use crate::config::{DispatchDefinition, DispatchSettings};
+use crate::config::{DispatchConfigDigest, DispatchSettings, load_repository_dispatch_config};
 use crate::repository::{BranchSection, RepositoryContext};
 use crate::storage::{TodoId, TodoStore};
 use crate::theme::Theme;

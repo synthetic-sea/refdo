@@ -7,8 +7,8 @@ mod text_input;
 mod ui;
 
 use std::{
-    collections::BTreeMap,
     io,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -27,7 +27,7 @@ use ratatui::{
 
 use dispatch::DispatchController;
 
-use crate::config::{DispatchDefinition, DispatchSettings, ThemeMode};
+use crate::config::{DispatchConfigDigest, DispatchSettings, ThemeMode};
 use crate::repository::RepositoryContext;
 use crate::storage::{Todo, TodoId, TodoStore};
 use crate::theme::{TOKYO_NIGHT_DAY, Theme};
@@ -42,6 +42,7 @@ enum Mode {
     Insert(Editor),
     Command(CommandLine),
     ConfirmClear(ClearConfirmation),
+    ConfirmDispatchTrust(DispatchTrustConfirmation),
 }
 
 impl Mode {
@@ -50,14 +51,25 @@ impl Mode {
             Self::Normal => " NORMAL ",
             Self::Insert(_) => " INSERT ",
             Self::Command(_) => " COMMAND ",
-            Self::ConfirmClear(_) => " CONFIRM ",
+            Self::ConfirmClear(_) | Self::ConfirmDispatchTrust(_) => " CONFIRM ",
         }
     }
 
     const fn editor(&self) -> Option<&Editor> {
         match self {
             Self::Insert(editor) => Some(editor),
-            Self::Normal | Self::Command(_) | Self::ConfirmClear(_) => None,
+            Self::Normal
+            | Self::Command(_)
+            | Self::ConfirmClear(_)
+            | Self::ConfirmDispatchTrust(_) => None,
+        }
+    }
+
+    fn footer_message(&self) -> Option<&str> {
+        match self {
+            Self::ConfirmClear(confirmation) => Some(&confirmation.prompt),
+            Self::ConfirmDispatchTrust(confirmation) => Some(&confirmation.prompt),
+            Self::Normal | Self::Insert(_) | Self::Command(_) => None,
         }
     }
 }
@@ -98,6 +110,15 @@ struct CommandLine {
 #[derive(Clone, Debug)]
 struct ClearConfirmation {
     target_branch: String,
+    prompt: String,
+}
+
+#[derive(Clone, Debug)]
+struct DispatchTrustConfirmation {
+    digest: DispatchConfigDigest,
+    display_name: String,
+    worktree_path: PathBuf,
+    prompt: String,
 }
 
 struct SystemThemeState {
@@ -335,7 +356,7 @@ impl App {
             frame,
             footer_area,
             &self.mode,
-            self.error.as_deref(),
+            self.mode.footer_message().or(self.error.as_deref()),
             &self.theme,
         );
     }
@@ -410,10 +431,9 @@ pub(crate) fn run(
     dark_theme: Theme,
     mode: ThemeMode,
     dispatch_settings: DispatchSettings,
-    dispatch_definitions: BTreeMap<String, DispatchDefinition>,
 ) -> std::io::Result<()> {
     ratatui::run(|terminal| {
-        let dispatch = DispatchController::new(dispatch_settings, dispatch_definitions);
+        let dispatch = DispatchController::new(dispatch_settings);
         let mut app = match mode {
             ThemeMode::Light => App::new(light_theme, dispatch),
             ThemeMode::Dark => App::new(dark_theme, dispatch),
