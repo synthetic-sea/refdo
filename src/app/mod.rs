@@ -32,6 +32,7 @@ use crate::repository::RepositoryContext;
 use crate::storage::{Todo, TodoId, TodoStore};
 use crate::theme::{TOKYO_NIGHT_DAY, Theme};
 
+const REPOSITORY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const SYSTEM_THEME_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const UNKNOWN_DATA_VERSION: i64 = -1;
@@ -154,6 +155,8 @@ struct App {
     data_version: i64,
     dispatch: DispatchController,
     error: Option<String>,
+    repository_error: Option<String>,
+    last_repository_refresh: Instant,
     clipboard_request: Option<String>,
     pointer_position: Option<Position>,
     last_todo_click: Option<TodoClick>,
@@ -170,24 +173,49 @@ impl Default for App {
 
 impl App {
     fn new(theme: Theme, dispatch: DispatchController) -> Self {
-        let mut repository = RepositoryContext::discover(".").unwrap_or_default();
-        let (store, mut error, persistence_available) =
-            if repository.common_git_dir.as_os_str().is_empty() {
-                (
-                    TodoStore::open_in_memory().expect("in-memory todo database must open"),
-                    Some("not inside a Git repository; todos are unavailable".to_owned()),
-                    false,
-                )
-            } else {
-                let database_path = repository.common_git_dir.join("refdo").join("data.db");
-                match TodoStore::open(&database_path) {
-                    Ok(store) => (store, None, true),
-                    Err(open_error) => (
-                        TodoStore::open_in_memory().expect("in-memory todo database must open"),
-                        Some(open_error.to_string()),
-                        false,
-                    ),
+        Self::new_with_repository_discovery(theme, dispatch, || {
+            RepositoryContext::discover(".").map_err(|error| error.to_string())
+        })
+    }
+
+    fn new_with_repository_discovery(
+        theme: Theme,
+        dispatch: DispatchController,
+        discover: impl FnOnce() -> Result<RepositoryContext, String>,
+    ) -> Self {
+        let (mut repository, store, repository_error, mut error, persistence_available) =
+            match discover() {
+                Ok(repository) => {
+                    if repository.common_git_dir.as_os_str().is_empty() {
+                        (
+                            repository,
+                            TodoStore::open_in_memory().expect("in-memory todo database must open"),
+                            None,
+                            Some("not inside a Git repository; todos are unavailable".to_owned()),
+                            false,
+                        )
+                    } else {
+                        let database_path = repository.common_git_dir.join("refdo").join("data.db");
+                        match TodoStore::open(&database_path) {
+                            Ok(store) => (repository, store, None, None, true),
+                            Err(open_error) => (
+                                repository,
+                                TodoStore::open_in_memory()
+                                    .expect("in-memory todo database must open"),
+                                None,
+                                Some(open_error.to_string()),
+                                false,
+                            ),
+                        }
+                    }
                 }
+                Err(discovery_error) => (
+                    RepositoryContext::default(),
+                    TodoStore::open_in_memory().expect("in-memory todo database must open"),
+                    Some(format!("repository: {discovery_error}")),
+                    None,
+                    false,
+                ),
             };
         let mut data_version = match store.data_version() {
             Ok(version) => version,
@@ -204,7 +232,7 @@ impl App {
                 Vec::new()
             }
         };
-        repository.add_stored_branches(todos.iter().map(|todo| todo.branch_ref.as_str()));
+        repository.reconcile_stored_branches(todos.iter().map(|todo| todo.branch_ref.as_str()));
 
         Self {
             exit: false,
@@ -221,6 +249,8 @@ impl App {
             data_version,
             dispatch,
             error,
+            repository_error,
+            last_repository_refresh: Instant::now(),
             clipboard_request: None,
             pointer_position: None,
             last_todo_click: None,
@@ -356,7 +386,10 @@ impl App {
             frame,
             footer_area,
             &self.mode,
-            self.mode.footer_message().or(self.error.as_deref()),
+            self.mode
+                .footer_message()
+                .or(self.repository_error.as_deref())
+                .or(self.error.as_deref()),
             &self.theme,
         );
     }
@@ -371,8 +404,9 @@ impl App {
         match self.store.load_all() {
             Ok(todos) => {
                 self.todos = todos;
-                self.repository
-                    .add_stored_branches(self.todos.iter().map(|todo| todo.branch_ref.as_str()));
+                self.repository.reconcile_stored_branches(
+                    self.todos.iter().map(|todo| todo.branch_ref.as_str()),
+                );
                 self.data_version = version;
                 self.repair_focus();
             }
@@ -392,8 +426,9 @@ impl App {
         match self.store.load_all() {
             Ok(todos) => {
                 self.todos = todos;
-                self.repository
-                    .add_stored_branches(self.todos.iter().map(|todo| todo.branch_ref.as_str()));
+                self.repository.reconcile_stored_branches(
+                    self.todos.iter().map(|todo| todo.branch_ref.as_str()),
+                );
                 self.data_version = version;
                 true
             }
@@ -411,8 +446,6 @@ impl App {
                 existing.sort_order += 1;
             }
         }
-        self.repository
-            .add_stored_branches(std::iter::once(todo.branch_ref.as_str()));
         self.todos.push(todo);
         self.todos.sort_by(|left, right| {
             left.branch_ref
@@ -420,6 +453,51 @@ impl App {
                 .then_with(|| left.sort_order.cmp(&right.sort_order))
                 .then_with(|| left.id.cmp(&right.id))
         });
+        self.repository
+            .reconcile_stored_branches(self.todos.iter().map(|todo| todo.branch_ref.as_str()));
+    }
+
+    fn refresh_repository(&mut self) {
+        self.refresh_repository_with(Instant::now(), || {
+            RepositoryContext::discover(".").map_err(|error| error.to_string())
+        });
+    }
+
+    fn refresh_repository_with(
+        &mut self,
+        now: Instant,
+        discover: impl FnOnce() -> Result<RepositoryContext, String>,
+    ) {
+        if self.repository.common_git_dir.as_os_str().is_empty() {
+            return;
+        }
+        if now
+            .checked_duration_since(self.last_repository_refresh)
+            .is_none_or(|elapsed| elapsed < REPOSITORY_REFRESH_INTERVAL)
+        {
+            return;
+        }
+        self.last_repository_refresh = now;
+        match discover() {
+            Ok(mut discovered) => {
+                if discovered.common_git_dir != self.repository.common_git_dir {
+                    self.repository_error = Some(
+                        "repository: discovered repository has a different common Git directory"
+                            .to_owned(),
+                    );
+                    return;
+                }
+                discovered.reconcile_stored_branches(
+                    self.todos.iter().map(|todo| todo.branch_ref.as_str()),
+                );
+                self.repository = discovered;
+                self.repository_error = None;
+                self.repair_focus();
+            }
+            Err(error) => {
+                self.repository_error = Some(format!("repository: {error}"));
+            }
+        }
     }
 }
 

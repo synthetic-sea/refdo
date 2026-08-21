@@ -1,5 +1,6 @@
-use super::*;
+use std::time::Instant;
 
+use super::*;
 pub(super) fn test_theme() -> Theme {
     Theme {
         background: Color::Red,
@@ -48,6 +49,8 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
         data_version: 0,
         dispatch: DispatchController::default(),
         error: None,
+        repository_error: None,
+        last_repository_refresh: Instant::now(),
         clipboard_request: None,
         pointer_position: None,
         last_todo_click: None,

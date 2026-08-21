@@ -239,6 +239,6 @@ Only one dispatch may run at a time. Execution is asynchronous, so refdo remains
 
 ## Storage
 
-refdo stores its database at `<git-common-dir>/refdo/data.db`. The database is shared by the repository's worktrees, while each listed branch has its own todos. Because it lives in Git's common directory rather than the working tree, the database is not committed to Git.
+refdo stores its database at `<git-common-dir>/refdo/data.db`. The database is shared by the repository's worktrees, while each listed branch has its own todos. Because it lives in Git's common directory rather than the working tree, the database is not committed to Git. refdo periodically refreshes live worktree and HEAD state while running, keeps todo-backed removed branches as stored-only, and retains the last known repository view during a temporary discovery failure.
 
 No persistence is available when refdo is run outside a Git repository.

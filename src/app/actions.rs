@@ -168,6 +168,9 @@ impl App {
         match self.store.delete_todo(id) {
             Ok(todo) => {
                 self.todos.retain(|candidate| candidate.id != id);
+                self.repository.reconcile_stored_branches(
+                    self.todos.iter().map(|todo| todo.branch_ref.as_str()),
+                );
                 self.todo_register = Some(todo);
                 let remaining = self.flattened_focuses();
                 self.focus = removed_index

@@ -239,6 +239,31 @@ fn dd_requires_consecutive_keys_and_focuses_the_next_row_after_cut() {
         Some("first")
     );
 }
+#[test]
+fn dd_on_sole_stored_only_todo_removes_section_and_repositions_focus() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo("refs/heads/stored-only", "sole stored", None)
+        .unwrap();
+    app.reload();
+    assert_eq!(app.repository.sections.len(), 2);
+    assert!(app.repository.sections[1].is_stored_only);
+    app.focus = Some(Focus::Todo(todo.id));
+
+    app.handle_key_event(key(KeyCode::Char('d')));
+    app.handle_key_event(key(KeyCode::Char('d')));
+
+    assert_eq!(app.pending_operator, None);
+    assert_eq!(
+        app.todo_register.as_ref().map(|t| t.title.as_str()),
+        Some("sole stored")
+    );
+    assert_eq!(app.repository.sections.len(), 1);
+    assert_eq!(app.repository.sections[0].display_name, "main");
+    assert_eq!(app.focus, Some(Focus::Branch("refs/heads/main".to_owned())));
+    assert!(app.todos.is_empty());
+}
 
 #[test]
 fn paste_register_persists_and_preserves_completion() {

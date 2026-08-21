@@ -23,6 +23,7 @@ impl App {
             }
         }
         self.refresh_external();
+        self.refresh_repository();
         self.refresh_system_theme();
         self.refresh_dispatch();
         Ok(())

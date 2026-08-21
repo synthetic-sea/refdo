@@ -98,7 +98,11 @@ impl RepositoryContext {
         })
     }
 
-    pub fn add_stored_branches<'a>(&mut self, branch_refs: impl IntoIterator<Item = &'a str>) {
+    pub fn reconcile_stored_branches<'a>(
+        &mut self,
+        branch_refs: impl IntoIterator<Item = &'a str>,
+    ) {
+        self.sections.retain(|section| !section.is_stored_only);
         let mut seen = self
             .sections
             .iter()
@@ -119,7 +123,11 @@ impl RepositoryContext {
                 is_stored_only: true,
             })
             .collect::<Vec<_>>();
-        stored_only.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+        stored_only.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.full_ref_name.cmp(&right.full_ref_name))
+        });
         self.sections.extend(stored_only);
     }
 }
@@ -318,11 +326,11 @@ mod tests {
     }
 
     #[test]
-    fn adds_sorted_stored_only_branches_without_duplicating_worktrees() {
+    fn reconciles_stored_only_branches_without_duplicating_or_moving_worktrees() {
         let fixture = Fixture::new();
         let mut context = RepositoryContext::discover(&fixture.main).unwrap();
 
-        context.add_stored_branches([
+        context.reconcile_stored_branches([
             "refs/heads/z-stored",
             "refs/heads/main",
             "refs/heads/a-stored",
@@ -340,8 +348,69 @@ mod tests {
         assert!(context.sections[3].is_stored_only);
         assert!(context.sections[4].is_stored_only);
         assert!(context.sections[3].worktree_path.as_os_str().is_empty());
+
+        context.reconcile_stored_branches(["refs/heads/z-stored"]);
+        assert_eq!(
+            context
+                .sections
+                .iter()
+                .map(|section| section.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["main", "feature/auth", "offline", "z-stored"]
+        );
+        assert!(!context.sections[0].is_stored_only);
+        assert!(context.sections[3].is_stored_only);
+
+        context.reconcile_stored_branches([]);
+        assert_eq!(
+            context
+                .sections
+                .iter()
+                .map(|section| section.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["main", "feature/auth", "offline"]
+        );
+        assert!(
+            context
+                .sections
+                .iter()
+                .all(|section| !section.is_stored_only)
+        );
+        assert!(context.sections[0].is_current);
     }
 
+    #[test]
+    fn discovers_runtime_worktree_additions_and_removals() {
+        let fixture = Fixture::new();
+        let dynamic = fixture.base.join("dynamic");
+        let initial = RepositoryContext::discover(&fixture.main).unwrap();
+        assert!(!initial.sections.iter().any(|s| s.display_name == "dynamic"));
+
+        git(
+            &fixture.main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "dynamic",
+                dynamic.to_str().unwrap(),
+            ],
+        );
+        let added = RepositoryContext::discover(&fixture.main).unwrap();
+        assert!(
+            added
+                .sections
+                .iter()
+                .any(|s| s.display_name == "dynamic" && !s.is_stored_only)
+        );
+
+        git(
+            &fixture.main,
+            &["worktree", "remove", dynamic.to_str().unwrap()],
+        );
+        let removed = RepositoryContext::discover(&fixture.main).unwrap();
+        assert!(!removed.sections.iter().any(|s| s.display_name == "dynamic"));
+    }
     #[test]
     fn includes_the_current_unborn_branch() {
         let id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
