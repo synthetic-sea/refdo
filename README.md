@@ -235,7 +235,7 @@ A dispatch requires a selected todo whose branch has a worktree and an explicitl
 
 Trust approves only the `.refdo.toml` definition bytes. It does not approve, authenticate, or pin scripts and other files that a command invokes transitively. Dispatch definitions execute as unsandboxed, trusted Bash through `bash -lc`, and refdo runs one only after an explicit `:dispatch <name>` invocation; review both the definition and everything it can execute before trusting and invoking it.
 
-Only one dispatch may run at a time. Execution is asynchronous, so refdo remains interactive while the footer reports running and completion status. Subprocess stdout and stderr are captured rather than inherited by the TUI: generator stdout supplies the branch name, while dispatch stdout is not displayed. A nonzero process reports the first non-empty stderr line when available or its exit status otherwise; startup, working-directory, and invalid generator-output errors are reported directly.
+Only one dispatch may run at a time. Execution is asynchronous, so refdo remains interactive while the footer reports running and completion status. Subprocess stdout and stderr are captured rather than inherited by the TUI: dispatch stdout is discarded; generator stdout is drained with a 4096-byte retained cap and must still be one non-empty UTF-8 line; raw diagnostic stderr and the final lossy diagnostic are each capped at 16384 bytes while excess is drained. Nonzero failures still use the first retained non-empty stderr line or status, with `…` when that line is truncated inside the cap; startup, working-directory, and invalid generator-output errors are reported directly.
 
 ## Storage
 
