@@ -63,6 +63,19 @@ impl App {
         }
     }
 
+    pub(in crate::app) fn repair_preview_mode(&mut self) {
+        let Mode::Preview(preview) = &self.mode else {
+            return;
+        };
+        let remains_previewable = self
+            .todos
+            .iter()
+            .any(|todo| todo.id == preview.todo_id && !todo.body.is_empty());
+        if !remains_previewable {
+            self.mode = Mode::Normal;
+        }
+    }
+
     pub(in crate::app) fn flattened_focuses(&self) -> Vec<Focus> {
         let mut rows = Vec::with_capacity(self.repository.sections.len() + self.todos.len());
         for section in &self.repository.sections {

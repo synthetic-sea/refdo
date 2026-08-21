@@ -46,15 +46,20 @@ Always launch refdo from within the Git repository or worktree whose todos you w
 | `]` | Select the next branch. |
 | `[` | Select the current branch header from a todo, or the previous branch from a branch header. |
 | `o` | Create a todo at the start of the selected branch, or after the selected todo. `Enter` saves it and remains in create mode for rapid entry. |
-| `i` | Edit the selected todo. |
+| `Enter` | Preview the selected todo's body. Todos without bodies report `Todo has no body`. |
+| `i` | Edit only the selected todo's title inline. Its body is unchanged. |
+| `e` | Edit the selected todo's title and body in `$VISUAL` or `$EDITOR`. |
 | `x` / `Space` | Toggle the selected todo between incomplete and complete. |
-| `yy` | Yank the selected todo into the internal register and copy its text to the system clipboard. |
-| `dd` | Cut the selected todo into the internal register. The todo is deleted until it is pasted. |
-| `p` | Paste the registered todo below the selection; on a branch header, paste at the end of that branch. |
-| `P` | Paste the registered todo above the selection; on a branch header, paste at the start of that branch. |
+| `yy` | Yank the complete selected todo into the internal register and copy only its title to the system clipboard. |
+| `dd` | Cut the complete selected todo, including its body, into the internal register. The todo is deleted until it is pasted. |
+| `p` | Paste the registered title, body, and completion state below the selection; on a branch header, paste at the end of that branch. |
+| `P` | Paste the registered title, body, and completion state above the selection; on a branch header, paste at the start of that branch. |
 | `:` | Open colon-command entry. |
 | `Esc` | Clear the current selection. |
 | `q` | Quit refdo. |
+
+
+Todos with a non-empty body show `≡` beside their completion or selection marker. Bodies stay hidden in the normal list.
 
 ### Text entry
 
@@ -71,6 +76,36 @@ These controls apply while creating or editing a todo and while entering a comma
 | `Delete` | Delete the character at the cursor. |
 | `Enter` | Submit the text or command. |
 | `Esc` | Cancel text entry. |
+
+
+### Body preview
+
+The preview is a modal view: list editing, selection, commands, and quitting remain disabled until it closes.
+
+| Key | Effect |
+| --- | --- |
+| `j` / `Down` | Scroll down one wrapped line. |
+| `k` / `Up` | Scroll up one wrapped line. |
+| `g` / `Home` | Scroll to the start. |
+| `G` / `End` | Scroll to the end. |
+| `Enter` / `Esc` | Close the preview and keep focus on the same todo. |
+
+### External editor
+
+Pressing `e` resolves the first non-empty value of `$VISUAL`, then `$EDITOR`. The value is parsed as a command plus arguments without invoking a shell, so settings such as `VISUAL="nvim -f"` work. refdo appends a secure temporary Markdown file path and waits for the command to exit. GUI editor commands must include their own wait option so they do not return before the file is closed.
+
+The editor document has this structure, using a unique token derived from the temporary filename:
+
+```markdown
+Todo title
+<!-- refdo:body:<unique-token> -->
+Long-form Markdown body
+<!-- refdo:end:<unique-token> -->
+```
+
+The title may span multiple lines. The body may contain arbitrary Markdown and trailing blank lines. Keep both generated marker lines intact and in order. On save, CRLF is normalized to LF, outer title whitespace is trimmed, and body whitespace is otherwise retained. An empty title is rejected.
+
+refdo restores the terminal before parsing or saving the edited todo. If the editor fails, the document is invalid, or database persistence fails, the original todo remains unchanged and the footer reports the path where the edited temporary file was preserved.
 
 ### Colon commands
 
@@ -89,7 +124,7 @@ When confirmation is shown, press `y` or `Y` to confirm. Press `n`, `N`, `Enter`
 
 ### Mouse
 
-In normal mode, click a row to select it, or double-click a todo's text to edit it with the cursor at the clicked location. Use the mouse wheel over the todo list to scroll.
+In normal mode, click a row to select it, or double-click a todo's title to edit that title inline at the clicked location. Use the mouse wheel over the todo list to scroll. In body preview, the wheel scrolls the preview and all other mouse input is ignored.
 
 ## Configuration
 
@@ -116,7 +151,7 @@ Named dispatches are repository capabilities committed in `.refdo.toml` at the r
 
 #### Implementing a todo with OMP, Worktrunk, and Herdr
 
-The following example generates a branch name with a one-shot OMP invocation, creates a worktree with [Worktrunk](https://worktrunk.dev/), opens that worktree in Herdr, and launches an OMP agent with the todo title as its initial prompt.
+The following example generates a branch name with a one-shot OMP invocation, creates a worktree with [Worktrunk](https://worktrunk.dev/), opens that worktree in Herdr, and launches an OMP agent with the todo's complete Markdown content as its initial prompt.
 
 It requires:
 
@@ -140,7 +175,7 @@ Then add the named definition to `.refdo.toml` in the repository root:
 command = './scripts/implement.sh {{BRANCH}} omp {{CONTENT}}'
 ```
 
-The `-p` flag makes OMP process the prompt non-interactively, print its response, and exit. `--no-session` avoids retaining a branch-generation session, while `--no-tools` and the other `--no-*` flags keep this small request isolated from repository tools and customization. `--max-time 30s` prevents the generator from remaining open indefinitely. The `--` before `{{CONTENT}}` ends option parsing, so a todo title beginning with `-` remains input data.
+The `-p` flag makes OMP process the prompt non-interactively, print its response, and exit. `--no-session` avoids retaining a branch-generation session, while `--no-tools` and the other `--no-*` flags keep this small request isolated from repository tools and customization. `--max-time 30s` prevents the generator from remaining open indefinitely. The `--` before `{{CONTENT}}` ends option parsing, so Markdown content beginning with `-` remains input data.
 
 Place the following executable at `scripts/implement.sh` in the repository:
 
@@ -218,13 +253,23 @@ Commit the definition and the script together so the capability travels with the
 git add .refdo.toml scripts/implement.sh
 ```
 
-On first use, select a todo in the target worktree and enter `:dispatch implement`. When refdo reports that the repository configuration is untrusted, inspect the committed `.refdo.toml`, enter `:dispatch-trust`, and press `y` to confirm. Trusting does not run the dispatch: enter `:dispatch implement` again. The global generator then receives the todo title and emits a single branch name. refdo runs the selected worktree's `./scripts/implement.sh` with exactly three arguments: the generated branch name, `omp`, and the literal todo title. The script creates the worktree, opens it in Herdr, and starts OMP in its root pane.
+On first use, select a todo in the target worktree and enter `:dispatch implement`. When refdo reports that the repository configuration is untrusted, inspect the committed `.refdo.toml`, enter `:dispatch-trust`, and press `y` to confirm. Trusting does not run the dispatch: enter `:dispatch implement` again. The global generator then receives the todo's complete Markdown content and emits a single branch name. refdo runs the selected worktree's `./scripts/implement.sh` with exactly three arguments: the generated branch name, `omp`, and the same complete Markdown content. The script creates the worktree, opens it in Herdr, and starts OMP in its root pane with that content as the initial prompt.
 
 #### Templates and execution
 
-Dispatch commands support `{{CONTENT}}`, which is the selected todo title, and `{{BRANCH}}`, which is the generator's output. Placeholders must appear unquoted in the configured shell source. refdo replaces them with quoted Bash positional parameters (`"$1"` and `"$2"`), so spaces, quotes, newlines, substitutions, and other shell metacharacters in their values remain data rather than being reparsed as commands.
+Dispatch commands support `{{CONTENT}}`, which is the complete Markdown payload for the selected todo or selected group, and `{{BRANCH}}`, which is the generator's output. Each title line is an H1 line prefixed with `# `. A non-empty body follows after one blank line and is otherwise passed verbatim. Selected todos remain in display order and are separated by one blank line. For example:
 
-The platform `generate_branch_name_command` is optional and supports `{{CONTENT}}` but not `{{BRANCH}}`. It runs first, in the selected todo's worktree, only when the selected dispatch contains `{{BRANCH}}`. Its stdout must be valid UTF-8 containing exactly one non-empty line after trimming. A dispatch without `{{BRANCH}}` does not invoke the generator; for example, `.refdo.toml` could contain:
+```markdown
+# First title
+
+First body
+
+# Second title
+```
+
+Placeholders must appear unquoted in the configured shell source. refdo replaces them with quoted Bash positional parameters (`\"$1\"` and `\"$2\"`), so spaces, quotes, newlines, substitutions, and other shell metacharacters in their values remain data rather than being reparsed as commands.
+
+The platform `generate_branch_name_command` is optional and supports `{{CONTENT}}` but not `{{BRANCH}}`. It receives the identical complete Markdown payload. It runs first, in the selected todo's worktree, only when the selected dispatch contains `{{BRANCH}}`. Its stdout must be valid UTF-8 containing exactly one non-empty line after trimming. A dispatch without `{{BRANCH}}` does not invoke the generator; for example, `.refdo.toml` could contain:
 
 ```toml
 [dispatches.notify]
@@ -239,6 +284,6 @@ Only one dispatch may run at a time. Execution is asynchronous, so refdo remains
 
 ## Storage
 
-refdo stores its database at `<git-common-dir>/refdo/data.db`. The database is shared by the repository's worktrees, while each listed branch has its own todos. Because it lives in Git's common directory rather than the working tree, the database is not committed to Git. refdo periodically refreshes live worktree and HEAD state while running, keeps todo-backed removed branches as stored-only, and retains the last known repository view during a temporary discovery failure.
+refdo stores its database at `<git-common-dir>/refdo/data.db`. The database is shared by the repository's worktrees, while each listed branch has its own todos with a title and optional long-form body. Because it lives in Git's common directory rather than the working tree, the database is not committed to Git. refdo periodically refreshes live worktree and HEAD state while running, keeps todo-backed removed branches as stored-only, and retains the last known repository view during a temporary discovery failure.
 
 No persistence is available when refdo is run outside a Git repository.

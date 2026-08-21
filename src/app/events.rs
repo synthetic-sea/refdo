@@ -32,6 +32,19 @@ impl App {
     pub(in crate::app) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
         let position = Position::new(mouse_event.column, mouse_event.row);
         self.pointer_position = Some(position);
+        if let Mode::Preview(preview) = &mut self.mode {
+            self.last_todo_click = None;
+            match mouse_event.kind {
+                MouseEventKind::ScrollUp => {
+                    preview.scroll = preview.scroll.saturating_sub(1);
+                }
+                MouseEventKind::ScrollDown => {
+                    preview.scroll = preview.scroll.saturating_add(1);
+                }
+                _ => {}
+            }
+            return;
+        }
         if matches!(
             mouse_event.kind,
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -73,14 +86,13 @@ impl App {
             };
 
             if let Mode::Select(select_state) = &self.mode {
-                if let Some(Focus::Todo(id)) = focus {
-                    if self
+                if let Some(Focus::Todo(id)) = focus
+                    && self
                         .todos
                         .iter()
                         .any(|todo| todo.id == id && todo.branch_ref == select_state.branch_ref)
-                    {
-                        self.focus = Some(Focus::Todo(id));
-                    }
+                {
+                    self.focus = Some(Focus::Todo(id));
                 }
                 self.last_todo_click = None;
                 return;
@@ -106,7 +118,8 @@ impl App {
         }
     }
 
-    fn handle_normal_key(&mut self, code: KeyCode) {
+    fn handle_normal_key(&mut self, key: KeyEvent) {
+        let code = key.code;
         let operator = match code {
             KeyCode::Char('d') => Some(PendingOperator::Cut),
             KeyCode::Char('y') => Some(PendingOperator::Yank),
@@ -136,6 +149,10 @@ impl App {
             KeyCode::Char('o') => self.open_create_editor(),
             KeyCode::Char(':') => self.open_command_line(),
             KeyCode::Char('i') => self.open_update_editor(None),
+            KeyCode::Char('e') if key.modifiers == KeyModifiers::NONE => {
+                self.request_external_edit();
+            }
+            KeyCode::Enter if key.modifiers == KeyModifiers::NONE => self.open_body_preview(),
             KeyCode::Char('x' | ' ') => self.toggle_focused_todo(),
             KeyCode::Char('p') => self.paste_registered_todo(true),
             KeyCode::Char('P') => self.paste_registered_todo(false),
@@ -150,9 +167,28 @@ impl App {
             return;
         }
         self.last_todo_click = None;
+        if let Mode::Preview(preview) = &mut self.mode {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    preview.scroll = preview.scroll.saturating_add(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    preview.scroll = preview.scroll.saturating_sub(1);
+                }
+                KeyCode::Char('g') | KeyCode::Home => preview.scroll = 0,
+                KeyCode::Char('G') | KeyCode::End => preview.scroll = u16::MAX,
+                KeyCode::Esc | KeyCode::Enter => {
+                    let todo_id = preview.todo_id;
+                    self.mode = Mode::Normal;
+                    self.focus = Some(Focus::Todo(todo_id));
+                }
+                _ => {}
+            }
+            return;
+        }
         match &self.mode {
             Mode::Normal => {
-                self.handle_normal_key(key.code);
+                self.handle_normal_key(key);
                 return;
             }
             Mode::Select(select_state) => {
@@ -171,6 +207,7 @@ impl App {
                 }
                 return;
             }
+            Mode::Preview(_) => unreachable!("preview mode is handled above"),
             Mode::Command(_) => match key.code {
                 KeyCode::Enter => {
                     self.execute_command_line();
@@ -236,6 +273,7 @@ impl App {
             }
             Mode::Normal
             | Mode::Select(_)
+            | Mode::Preview(_)
             | Mode::ConfirmClear(_)
             | Mode::ConfirmDispatchTrust(_) => {}
         }

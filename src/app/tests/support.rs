@@ -52,6 +52,7 @@ pub(super) fn app_with_sections(sections: Vec<BranchSection>) -> App {
         repository_error: None,
         last_repository_refresh: Instant::now(),
         clipboard_request: None,
+        external_edit_request: None,
         pointer_position: None,
         last_todo_click: None,
         frame_area: Rect::default(),

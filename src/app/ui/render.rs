@@ -5,13 +5,15 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Clear, Paragraph},
 };
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::super::{Editor, Focus, Mode, SelectState};
+use super::super::{BodyPreview, Editor, Focus, Mode, SelectState};
 use super::layout::{DisplayRow, DisplayRowLayout, maximum_viewport_start};
 use crate::repository::BranchSection;
+use crate::storage::Todo;
 use crate::theme::Theme;
 
 const INCOMPLETE_TODO_MARKER: &str = "󰄱";
@@ -102,6 +104,90 @@ pub(in crate::app) fn render_footer(
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(footer_style), area);
+}
+
+pub(in crate::app) fn render_body_preview(
+    frame: &mut Frame,
+    preview: &mut BodyPreview,
+    todo: &Todo,
+    theme: &Theme,
+) {
+    let frame_area = frame.area();
+    if frame_area.width == 0 || frame_area.height == 0 {
+        return;
+    }
+    let width = frame_area.width.saturating_mul(80) / 100;
+    let height = frame_area.height.saturating_mul(80) / 100;
+    if width < 3 || height < 3 {
+        return;
+    }
+    let area = Rect::new(
+        frame_area.x + (frame_area.width - width) / 2,
+        frame_area.y + (frame_area.height - height) / 2,
+        width,
+        height,
+    );
+    let block = Block::bordered()
+        .title(" Todo details ")
+        .style(Style::default().fg(theme.foreground).bg(theme.background))
+        .border_style(Style::default().fg(theme.mode_background));
+    let inner = block.inner(area);
+    let mut lines = wrapped_slices(&todo.title, inner.width)
+        .into_iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                line,
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::default());
+    lines.extend(
+        wrapped_slices(&todo.body, inner.width)
+            .into_iter()
+            .map(Line::raw),
+    );
+    let maximum_scroll = lines.len().saturating_sub(usize::from(inner.height));
+    let maximum_scroll = u16::try_from(maximum_scroll).unwrap_or(u16::MAX);
+    preview.scroll = preview.scroll.min(maximum_scroll);
+    let paragraph =
+        Paragraph::new(lines).style(Style::default().fg(theme.foreground).bg(theme.background));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(paragraph.scroll((preview.scroll, 0)), inner);
+}
+
+fn wrapped_slices(text: &str, width: u16) -> Vec<&str> {
+    let width = usize::from(width);
+    let mut lines = Vec::new();
+    for explicit_line in text.split('\n') {
+        if explicit_line.is_empty() {
+            lines.push(explicit_line);
+            continue;
+        }
+
+        let mut start = 0;
+        let mut used_width = 0usize;
+        for (index, grapheme) in explicit_line.grapheme_indices(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if used_width > 0 && used_width.saturating_add(grapheme_width) > width {
+                lines.push(&explicit_line[start..index]);
+                start = index;
+                used_width = 0;
+            }
+            if used_width == 0 && grapheme_width > width {
+                lines.push(grapheme);
+                start = index + grapheme.len();
+            } else {
+                used_width = used_width.saturating_add(grapheme_width);
+            }
+        }
+        if start < explicit_line.len() {
+            lines.push(&explicit_line[start..]);
+        }
+    }
+    lines
 }
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn render_branch_sections(
@@ -204,7 +290,11 @@ pub(in crate::app) fn render_branch_sections(
                     1,
                 );
                 frame.render_widget(
-                    Paragraph::new(format!("   {marker} ")).style(style),
+                    Paragraph::new(format!(
+                        " {} {marker} ",
+                        if todo.body.is_empty() { " " } else { "≡" }
+                    ))
+                    .style(style),
                     marker_area,
                 );
 

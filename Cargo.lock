@@ -2684,6 +2684,8 @@ dependencies = [
  "rusqlite",
  "serde",
  "sha2",
+ "shell-words",
+ "tempfile",
  "toml",
  "unicode-segmentation",
  "unicode-width",

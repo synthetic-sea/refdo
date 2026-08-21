@@ -1,3 +1,5 @@
+use crate::app::external_editor;
+
 use super::super::PendingOperator;
 use super::support::*;
 use super::*;
@@ -18,7 +20,13 @@ fn yy_queues_exact_unicode_title_and_replaces_todo_register_without_mutating_tod
         .unwrap();
     let todo = app
         .store
-        .insert_todo("refs/heads/main", "Ship 🚀 café", Some(previous.id))
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "Ship 🚀 café",
+            "clipboard must not include this\nsecond line",
+            false,
+            Some(previous.id),
+        )
         .unwrap();
     app.store.toggle_todo(todo.id).unwrap();
     app.reload();
@@ -45,9 +53,15 @@ fn yy_queues_exact_unicode_title_and_replaces_todo_register_without_mutating_tod
         app.todo_register.as_ref().map(|registered| (
             registered.id,
             registered.title.as_str(),
+            registered.body.as_str(),
             registered.completed
         )),
-        Some((todo.id, "Ship 🚀 café", true))
+        Some((
+            todo.id,
+            "Ship 🚀 café",
+            "clipboard must not include this\nsecond line",
+            true
+        ))
     );
     assert_eq!(app.todos, todos_before);
     assert_eq!(app.store.load_all().unwrap(), stored_before);
@@ -59,7 +73,13 @@ fn yanked_todo_can_be_pasted_without_removing_the_original() {
     let mut app = app_with_sections(vec![section("main")]);
     let original = app
         .store
-        .insert_todo("refs/heads/main", "duplicate me", None)
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "duplicate me",
+            "first body line\n\nlast body line\n",
+            false,
+            None,
+        )
         .unwrap();
     app.store.toggle_todo(original.id).unwrap();
     app.reload();
@@ -82,6 +102,11 @@ fn yanked_todo_can_be_pasted_without_removing_the_original() {
         Some(original.id)
     );
     assert_eq!(app.store.load_all().unwrap(), app.todos);
+    assert!(
+        app.todos
+            .iter()
+            .all(|todo| todo.body == "first body line\n\nlast body line\n")
+    );
 }
 
 #[test]
@@ -270,7 +295,13 @@ fn paste_register_persists_and_preserves_completion() {
     let mut app = app_with_sections(vec![section("main")]);
     let completed = app
         .store
-        .insert_todo("refs/heads/main", "repeat me", None)
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "repeat me",
+            "preserve\nthis body",
+            false,
+            None,
+        )
         .unwrap();
     app.store.toggle_todo(completed.id).unwrap();
     app.reload();
@@ -301,6 +332,11 @@ fn paste_register_persists_and_preserves_completion() {
             ("repeat me".to_owned(), true)
         ]
     );
+    assert!(
+        app.todos
+            .iter()
+            .all(|todo| todo.body == "preserve\nthis body")
+    );
     assert_eq!(app.store.load_all().unwrap(), app.todos);
 }
 
@@ -317,7 +353,13 @@ fn todo_paste_positions_above_and_below_in_another_section() {
         .unwrap();
     let source = app
         .store
-        .insert_todo("refs/heads/topic", "source", None)
+        .insert_todo_with_completion(
+            "refs/heads/topic",
+            "source",
+            "cross-branch\nbody\n",
+            false,
+            None,
+        )
         .unwrap();
     app.reload();
     app.focus = Some(Focus::Todo(source.id));
@@ -346,6 +388,14 @@ fn todo_paste_positions_above_and_below_in_another_section() {
             ("source".to_owned(), false),
             ("second".to_owned(), false)
         ]
+    );
+    assert_eq!(
+        app.todos
+            .iter()
+            .filter(|todo| todo.branch_ref == "refs/heads/main" && todo.title == "source")
+            .map(|todo| todo.body.as_str())
+            .collect::<Vec<_>>(),
+        ["cross-branch\nbody\n", "cross-branch\nbody\n"]
     );
     assert!(branch_titles(&app, "refs/heads/topic").is_empty());
     assert_eq!(app.store.load_all().unwrap(), app.todos);
@@ -555,11 +605,100 @@ fn unavailable_persistence_does_not_open_an_editor() {
 }
 
 #[test]
+fn e_queues_only_an_unmodified_focused_persisted_todo() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo("refs/heads/main", "edit externally", None)
+        .unwrap();
+    app.reload();
+    app.error = Some("keep this".to_owned());
+
+    app.focus = Some(Focus::Branch("refs/heads/main".to_owned()));
+    app.handle_key_event(key(KeyCode::Char('e')));
+    assert_eq!(app.external_edit_request, None);
+    assert_eq!(app.error.as_deref(), Some("keep this"));
+
+    app.focus = Some(Focus::Todo(todo.id));
+    app.handle_key_event(modified_key(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    assert_eq!(app.external_edit_request, None);
+    assert_eq!(app.error.as_deref(), Some("keep this"));
+
+    app.handle_key_event(key(KeyCode::Char('e')));
+    assert_eq!(app.external_edit_request, Some(todo.id));
+    assert_eq!(app.error, None);
+
+    app.external_edit_request = None;
+    app.persistence_available = false;
+    app.error = Some("database unavailable".to_owned());
+    app.handle_key_event(key(KeyCode::Char('e')));
+    assert_eq!(app.external_edit_request, None);
+    assert_eq!(app.error.as_deref(), Some("database unavailable"));
+}
+
+#[test]
+fn failed_external_edit_persistence_keeps_both_original_fields() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "original title",
+            "original\nbody\n",
+            false,
+            None,
+        )
+        .unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(todo.id));
+    let before = app.todos.clone();
+    app.store.delete_todo(todo.id).unwrap();
+    let edited = external_editor::edited_for_test("replacement title", "replacement body");
+
+    app.persist_external_edit(todo.id, edited);
+
+    assert_eq!(app.todos, before);
+    assert!(app.store.load_all().unwrap().is_empty());
+    let error = app.error.as_deref().unwrap();
+    assert!(error.contains("does not exist"));
+    let path = error.split_once("; edits preserved at ").unwrap().1;
+    assert!(std::fs::metadata(path).is_ok());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn successful_external_edit_persistence_updates_both_fields_once() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "original title",
+            "original body",
+            true,
+            None,
+        )
+        .unwrap();
+    app.reload();
+    let edited = external_editor::edited_for_test("replacement title", "replacement\nbody\n");
+
+    app.persist_external_edit(todo.id, edited);
+
+    assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+    assert_eq!(app.error, None);
+    assert!(app.reveal_focus);
+    assert_eq!(app.todos[0].title, "replacement title");
+    assert_eq!(app.todos[0].body, "replacement\nbody\n");
+    assert!(app.todos[0].completed);
+    assert_eq!(app.store.load_all().unwrap(), app.todos);
+}
+
+#[test]
 fn edit_save_updates_title_and_returns_to_normal_with_focus() {
     let mut app = app_with_sections(vec![section("main")]);
     let todo = app
         .store
-        .insert_todo("refs/heads/main", "old", None)
+        .insert_todo_with_completion("refs/heads/main", "old", "long-form\nbody\n", false, None)
         .unwrap();
     app.store.toggle_todo(todo.id).unwrap();
     app.reload();
@@ -582,6 +721,8 @@ fn edit_save_updates_title_and_returns_to_normal_with_focus() {
     assert!(persisted[0].completed);
     assert_eq!(app.todos[0].title, "new title");
     assert!(app.todos[0].completed);
+    assert_eq!(persisted[0].body, "long-form\nbody\n");
+    assert_eq!(app.todos[0].body, "long-form\nbody\n");
 }
 
 #[test]

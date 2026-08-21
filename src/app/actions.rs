@@ -1,3 +1,4 @@
+use crate::storage::StoreError;
 use std::collections::HashSet;
 
 use super::{App, Editor, EditorTarget, Focus, Mode, SelectState};
@@ -12,6 +13,35 @@ impl App {
         };
         self.clipboard_request = Some(todo.title.clone());
         self.todo_register = Some(todo);
+    }
+
+    pub(in crate::app) fn request_external_edit(&mut self) {
+        if !self.persistence_available {
+            return;
+        }
+        let Some(Focus::Todo(id)) = self.focus.as_ref() else {
+            return;
+        };
+        self.external_edit_request = Some(*id);
+        self.error = None;
+    }
+
+    pub(in crate::app) fn open_body_preview(&mut self) {
+        let Some(Focus::Todo(id)) = self.focus.as_ref() else {
+            return;
+        };
+        let Some(todo) = self.todos.iter().find(|todo| todo.id == *id) else {
+            return;
+        };
+        if todo.body.is_empty() {
+            self.error = Some("Todo has no body".to_owned());
+            return;
+        }
+        self.mode = Mode::Preview(super::BodyPreview {
+            todo_id: *id,
+            scroll: 0,
+        });
+        self.error = None;
     }
 
     pub(in crate::app) fn open_create_editor(&mut self) {
@@ -119,18 +149,29 @@ impl App {
                     Err(error) => self.error = Some(error.to_string()),
                 }
             }
-            EditorTarget::Update { id } => match self.store.update_todo_title(id, &text) {
-                Ok(todo) => {
-                    if let Some(existing) = self.todos.iter_mut().find(|todo| todo.id == id) {
-                        *existing = todo;
+            EditorTarget::Update { id } => {
+                let Some(body) = self
+                    .todos
+                    .iter()
+                    .find(|todo| todo.id == id)
+                    .map(|todo| todo.body.clone())
+                else {
+                    self.error = Some(StoreError::TodoNotFound(id).to_string());
+                    return;
+                };
+                match self.store.update_todo(id, &text, &body) {
+                    Ok(todo) => {
+                        if let Some(existing) = self.todos.iter_mut().find(|todo| todo.id == id) {
+                            *existing = todo;
+                        }
+                        self.focus = Some(Focus::Todo(id));
+                        self.mode = Mode::Normal;
+                        self.error = None;
+                        self.reveal_focus = true;
                     }
-                    self.focus = Some(Focus::Todo(id));
-                    self.mode = Mode::Normal;
-                    self.error = None;
-                    self.reveal_focus = true;
+                    Err(error) => self.error = Some(error.to_string()),
                 }
-                Err(error) => self.error = Some(error.to_string()),
-            },
+            }
         }
     }
 
@@ -231,6 +272,7 @@ impl App {
         match self.store.insert_todo_with_completion(
             &branch_ref,
             &registered.title,
+            &registered.body,
             registered.completed,
             after,
         ) {

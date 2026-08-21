@@ -9,6 +9,7 @@ pub struct Todo {
     pub id: TodoId,
     pub branch_ref: String,
     pub title: String,
+    pub body: String,
     pub completed: bool,
     pub sort_order: i64,
 }
@@ -101,7 +102,7 @@ impl TodoStore {
 
     pub fn load_all(&self) -> Result<Vec<Todo>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, branch_ref, title, completed, sort_order
+            "SELECT id, branch_ref, title, body, completed, sort_order
              FROM todos
              ORDER BY branch_ref, sort_order, id",
         )?;
@@ -111,8 +112,9 @@ impl TodoStore {
                     id: row.get(0)?,
                     branch_ref: row.get(1)?,
                     title: row.get(2)?,
-                    completed: row.get(3)?,
-                    sort_order: row.get(4)?,
+                    body: row.get(3)?,
+                    completed: row.get(4)?,
+                    sort_order: row.get(5)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -125,13 +127,14 @@ impl TodoStore {
         title: &str,
         after: Option<TodoId>,
     ) -> Result<Todo, StoreError> {
-        self.insert_todo_with_completion(branch_ref, title, false, after)
+        self.insert_todo_with_completion(branch_ref, title, "", false, after)
     }
 
     pub fn insert_todo_with_completion(
         &mut self,
         branch_ref: &str,
         title: &str,
+        body: &str,
         completed: bool,
         after: Option<TodoId>,
     ) -> Result<Todo, StoreError> {
@@ -195,9 +198,9 @@ impl TodoStore {
         }
 
         transaction.execute(
-            "INSERT INTO todos (branch_ref, title, completed, sort_order)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![branch_ref, title, completed, sort_order],
+            "INSERT INTO todos (branch_ref, title, body, completed, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![branch_ref, title, body, completed, sort_order],
         )?;
         let id = transaction.last_insert_rowid();
         transaction.commit()?;
@@ -206,6 +209,7 @@ impl TodoStore {
             id,
             branch_ref: branch_ref.to_owned(),
             title: title.to_owned(),
+            body: body.to_owned(),
             completed,
             sort_order,
         })
@@ -219,15 +223,16 @@ impl TodoStore {
             .query_row(
                 "DELETE FROM todos
                  WHERE id = ?1
-                 RETURNING id, branch_ref, title, completed, sort_order",
+                 RETURNING id, branch_ref, title, body, completed, sort_order",
                 [id],
                 |row| {
                     Ok(Todo {
                         id: row.get(0)?,
                         branch_ref: row.get(1)?,
                         title: row.get(2)?,
-                        completed: row.get(3)?,
-                        sort_order: row.get(4)?,
+                        body: row.get(3)?,
+                        completed: row.get(4)?,
+                        sort_order: row.get(5)?,
                     })
                 },
             )
@@ -303,7 +308,7 @@ impl TodoStore {
         Ok(ordered_todos.len())
     }
 
-    pub fn update_todo_title(&mut self, id: TodoId, title: &str) -> Result<Todo, StoreError> {
+    pub fn update_todo(&mut self, id: TodoId, title: &str, body: &str) -> Result<Todo, StoreError> {
         let title = title.trim();
         if title.is_empty() {
             return Err(StoreError::EmptyTitle);
@@ -315,17 +320,18 @@ impl TodoStore {
         let todo = transaction
             .query_row(
                 "UPDATE todos
-                 SET title = ?1
-                 WHERE id = ?2
-                 RETURNING id, branch_ref, title, completed, sort_order",
-                params![title, id],
+                 SET title = ?1, body = ?2
+                 WHERE id = ?3
+                 RETURNING id, branch_ref, title, body, completed, sort_order",
+                params![title, body, id],
                 |row| {
                     Ok(Todo {
                         id: row.get(0)?,
                         branch_ref: row.get(1)?,
                         title: row.get(2)?,
-                        completed: row.get(3)?,
-                        sort_order: row.get(4)?,
+                        body: row.get(3)?,
+                        completed: row.get(4)?,
+                        sort_order: row.get(5)?,
                     })
                 },
             )
@@ -344,15 +350,16 @@ impl TodoStore {
                 "UPDATE todos
                  SET completed = 1 - completed
                  WHERE id = ?1
-                 RETURNING id, branch_ref, title, completed, sort_order",
+                 RETURNING id, branch_ref, title, body, completed, sort_order",
                 [id],
                 |row| {
                     Ok(Todo {
                         id: row.get(0)?,
                         branch_ref: row.get(1)?,
                         title: row.get(2)?,
-                        completed: row.get(3)?,
-                        sort_order: row.get(4)?,
+                        body: row.get(3)?,
+                        completed: row.get(4)?,
+                        sort_order: row.get(5)?,
                     })
                 },
             )
@@ -431,12 +438,12 @@ fn configure_connection(connection: &Connection, file_backed: bool) -> Result<()
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
-    const SCHEMA_VERSION: i64 = 2;
+    const SCHEMA_VERSION: i64 = 3;
 
     let version = connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
     match version {
         SCHEMA_VERSION => return Ok(()),
-        0 | 1 => {}
+        0..=2 => {}
         version => return Err(StoreError::UnsupportedSchemaVersion(version)),
     }
 
@@ -451,6 +458,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
                     id INTEGER PRIMARY KEY,
                     branch_ref TEXT NOT NULL,
                     title TEXT NOT NULL CHECK (length(title) > 0 AND title = trim(title)),
+                    body TEXT NOT NULL DEFAULT '',
                     completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
                     sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -460,7 +468,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
                     digest BLOB PRIMARY KEY CHECK (length(digest) = 32),
                     trusted_at INTEGER NOT NULL DEFAULT (unixepoch())
                 );
-                PRAGMA user_version = 2;",
+                PRAGMA user_version = 3;",
             )?;
         }
         1 => {
@@ -469,7 +477,14 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
                     digest BLOB PRIMARY KEY CHECK (length(digest) = 32),
                     trusted_at INTEGER NOT NULL DEFAULT (unixepoch())
                 );
-                PRAGMA user_version = 2;",
+                ALTER TABLE todos ADD COLUMN body TEXT NOT NULL DEFAULT '';
+                PRAGMA user_version = 3;",
+            )?;
+        }
+        2 => {
+            transaction.execute_batch(
+                "ALTER TABLE todos ADD COLUMN body TEXT NOT NULL DEFAULT '';
+                PRAGMA user_version = 3;",
             )?;
         }
         version => return Err(StoreError::UnsupportedSchemaVersion(version)),
@@ -569,7 +584,7 @@ mod tests {
             .unwrap();
 
         let second = store
-            .insert_todo_with_completion("refs/heads/main", "second", false, Some(first.id))
+            .insert_todo_with_completion("refs/heads/main", "second", "", false, Some(first.id))
             .unwrap();
 
         assert_eq!(
@@ -588,7 +603,7 @@ mod tests {
         let mut store = TodoStore::open_in_memory().unwrap();
 
         let completed = store
-            .insert_todo_with_completion("refs/heads/main", "done", true, None)
+            .insert_todo_with_completion("refs/heads/main", "done", "", true, None)
             .unwrap();
 
         assert!(completed.completed);
@@ -600,7 +615,7 @@ mod tests {
         let mut store = TodoStore::open_in_memory().unwrap();
         let first = store.insert_todo("refs/heads/main", "first", None).unwrap();
         let completed = store
-            .insert_todo_with_completion("refs/heads/main", "done", true, Some(first.id))
+            .insert_todo_with_completion("refs/heads/main", "done", "", true, Some(first.id))
             .unwrap();
 
         let deleted = store.delete_todo(completed.id).unwrap();
@@ -619,6 +634,7 @@ mod tests {
             .insert_todo_with_completion(
                 "refs/heads/main",
                 "main completed first",
+                "",
                 true,
                 Some(main_incomplete.id),
             )
@@ -627,12 +643,13 @@ mod tests {
             .insert_todo_with_completion(
                 "refs/heads/main",
                 "main completed second",
+                "",
                 true,
                 Some(main_completed_first.id),
             )
             .unwrap();
         let feature_completed = store
-            .insert_todo_with_completion("refs/heads/feature", "feature completed", true, None)
+            .insert_todo_with_completion("refs/heads/feature", "feature completed", "", true, None)
             .unwrap();
         let feature_incomplete = store
             .insert_todo(
@@ -658,10 +675,10 @@ mod tests {
             .insert_todo("refs/heads/main", "main incomplete", None)
             .unwrap();
         store
-            .insert_todo_with_completion("refs/heads/main", "main completed", true, None)
+            .insert_todo_with_completion("refs/heads/main", "main completed", "", true, None)
             .unwrap();
         let feature_completed = store
-            .insert_todo_with_completion("refs/heads/feature", "feature completed", true, None)
+            .insert_todo_with_completion("refs/heads/feature", "feature completed", "", true, None)
             .unwrap();
         let feature_incomplete = store
             .insert_todo(
@@ -684,13 +701,13 @@ mod tests {
     fn sorts_requested_branch_by_completion_creation_and_id() {
         let mut store = TodoStore::open_in_memory().unwrap();
         let completed_newer = store
-            .insert_todo_with_completion("refs/heads/main", "completed newer", true, None)
+            .insert_todo_with_completion("refs/heads/main", "completed newer", "", true, None)
             .unwrap();
         let incomplete_newer = store
             .insert_todo("refs/heads/main", "incomplete newer", None)
             .unwrap();
         let completed_older = store
-            .insert_todo_with_completion("refs/heads/main", "completed older", true, None)
+            .insert_todo_with_completion("refs/heads/main", "completed older", "", true, None)
             .unwrap();
         let incomplete_older = store
             .insert_todo("refs/heads/main", "incomplete older", None)
@@ -788,7 +805,7 @@ mod tests {
     fn groups_only_the_requested_branch_without_reordering_within_completion_states() {
         let mut store = TodoStore::open_in_memory().unwrap();
         let completed_first = store
-            .insert_todo_with_completion("refs/heads/main", "completed first", true, None)
+            .insert_todo_with_completion("refs/heads/main", "completed first", "", true, None)
             .unwrap();
         let incomplete_first = store
             .insert_todo(
@@ -801,6 +818,7 @@ mod tests {
             .insert_todo_with_completion(
                 "refs/heads/main",
                 "completed second",
+                "",
                 true,
                 Some(incomplete_first.id),
             )
@@ -813,7 +831,7 @@ mod tests {
             )
             .unwrap();
         let other_completed = store
-            .insert_todo_with_completion("refs/heads/other", "other completed", true, None)
+            .insert_todo_with_completion("refs/heads/other", "other completed", "", true, None)
             .unwrap();
         let other_incomplete = store
             .insert_todo(
@@ -982,12 +1000,18 @@ mod tests {
             .insert_todo("refs/heads/feature", "first", None)
             .unwrap();
         let target = store
-            .insert_todo("refs/heads/feature", "old title", Some(first.id))
+            .insert_todo_with_completion(
+                "refs/heads/feature",
+                "old title",
+                "line one\n\nline three\n",
+                false,
+                Some(first.id),
+            )
             .unwrap();
         let completed = store.toggle_todo(target.id).unwrap();
 
         let updated = store
-            .update_todo_title(completed.id, "  new title \t")
+            .update_todo(completed.id, "  new title \t", &completed.body)
             .unwrap();
 
         assert_eq!(
@@ -1008,7 +1032,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            store.update_todo_title(inserted.id, " \t\n "),
+            store.update_todo(inserted.id, " \t\n ", &inserted.body),
             Err(StoreError::EmptyTitle)
         ));
         assert_eq!(store.load_all().unwrap(), vec![inserted]);
@@ -1019,7 +1043,7 @@ mod tests {
         let mut store = TodoStore::open_in_memory().unwrap();
 
         assert!(matches!(
-            store.update_todo_title(42, "new title"),
+            store.update_todo(42, "new title", "body"),
             Err(StoreError::TodoNotFound(42))
         ));
         assert!(store.load_all().unwrap().is_empty());
@@ -1130,6 +1154,7 @@ mod tests {
         assert_eq!(todos[0].branch_ref, "refs/heads/legacy");
         assert_eq!(todos[0].title, "preserved");
         assert!(todos[0].completed);
+        assert_eq!(todos[0].body, "");
         assert_eq!(todos[0].sort_order, 0);
         assert!(!store.is_dispatch_config_trusted(&[0x55; 32]).unwrap());
         assert_eq!(
@@ -1137,8 +1162,61 @@ mod tests {
                 .connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
+    }
+
+    #[test]
+    fn migrates_schema_v2_and_reopens_with_a_multiline_body() {
+        let database = TemporaryDatabase::new();
+        fs::create_dir_all(database.path().parent().unwrap()).unwrap();
+        {
+            let connection = rusqlite::Connection::open(database.path()).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE todos (
+                        id INTEGER PRIMARY KEY,
+                        branch_ref TEXT NOT NULL,
+                        title TEXT NOT NULL CHECK (length(title) > 0 AND title = trim(title)),
+                        completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+                        sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+                        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                        UNIQUE (branch_ref, sort_order)
+                    );
+                    CREATE TABLE trusted_dispatch_configs (
+                        digest BLOB PRIMARY KEY CHECK (length(digest) = 32),
+                        trusted_at INTEGER NOT NULL DEFAULT (unixepoch())
+                    );
+                    INSERT INTO todos (id, branch_ref, title, completed, sort_order)
+                    VALUES (23, 'refs/heads/legacy', 'preserved', 0, 0);
+                    PRAGMA user_version = 2;",
+                )
+                .unwrap();
+        }
+
+        {
+            let mut store = TodoStore::open(database.path()).unwrap();
+            let mut todo = store.load_all().unwrap().pop().unwrap();
+            assert_eq!(todo.body, "");
+            todo = store
+                .update_todo(todo.id, &todo.title, "first line\n\nlast line\n")
+                .unwrap();
+            assert_eq!(todo.body, "first line\n\nlast line\n");
+            assert_eq!(
+                store
+                    .connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                3
+            );
+        }
+
+        let reopened = TodoStore::open(database.path()).unwrap();
+        let todos = reopened.load_all().unwrap();
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].id, 23);
+        assert_eq!(todos[0].title, "preserved");
+        assert_eq!(todos[0].body, "first line\n\nlast line\n");
     }
 
     #[test]
@@ -1147,7 +1225,7 @@ mod tests {
         let (incomplete_id, completed_id) = {
             let mut store = TodoStore::open(database.path()).unwrap();
             let completed = store
-                .insert_todo_with_completion("refs/heads/main", "completed", true, None)
+                .insert_todo_with_completion("refs/heads/main", "completed", "", true, None)
                 .unwrap();
             let incomplete = store
                 .insert_todo("refs/heads/main", "incomplete", Some(completed.id))

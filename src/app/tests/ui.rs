@@ -10,6 +10,13 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     }
 }
 
+fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+    (0..terminal.backend().buffer().area.height)
+        .map(|row| row_text(terminal, row))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn hover_background_applies_to_unselected_todo_and_branch_rows() {
     let mut app = app_with_sections(vec![section("main"), section("topic")]);
@@ -812,4 +819,205 @@ fn select_mode_left_click_selects_the_rendered_row_within_branch() {
     }
     assert_eq!(app.focus, Some(Focus::Todo(m2.id)));
     assert!(matches!(&app.mode, Mode::Select(_)));
+}
+
+#[test]
+fn normal_list_hides_bodies_and_marks_only_body_bearing_todos() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let with_body = app
+        .store
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "visible title",
+            "SECRET BODY TEXT",
+            false,
+            None,
+        )
+        .unwrap();
+    app.store
+        .insert_todo("refs/heads/main", "title only", Some(with_body.id))
+        .unwrap();
+    app.reload();
+    let backend = TestBackend::new(50, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("visible title"));
+    assert!(screen.contains("title only"));
+    assert!(!screen.contains("SECRET BODY TEXT"));
+    assert_eq!(terminal.backend().buffer()[(3, 3)].symbol(), "≡");
+    assert_eq!(terminal.backend().buffer()[(3, 4)].symbol(), " ");
+}
+
+#[test]
+fn enter_opens_scrolls_clamps_and_closes_the_focused_body_preview() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let body = (0..=12)
+        .map(|line| format!("line-{line:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let todo = app
+        .store
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "Preview title\nsecond title line",
+            &body,
+            false,
+            None,
+        )
+        .unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(todo.id));
+    let backend = TestBackend::new(40, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(!screen_text(&terminal).contains("line-00"));
+
+    app.handle_key_event(key(KeyCode::Enter));
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    assert!(matches!(
+        app.mode,
+        Mode::Preview(BodyPreview {
+            todo_id,
+            scroll: 0
+        }) if todo_id == todo.id
+    ));
+    let first_page = screen_text(&terminal);
+    assert!(first_page.contains("Todo details"));
+    assert!(first_page.contains("Preview title"));
+    assert!(first_page.contains("second title line"));
+    assert!(first_page.contains("line-00"));
+    assert!(row_text(&terminal, 11).starts_with(" PREVIEW "));
+
+    app.handle_key_event(key(KeyCode::Down));
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert_ne!(screen_text(&terminal), first_page);
+    assert!(matches!(
+        app.mode,
+        Mode::Preview(BodyPreview { scroll: 1, .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Char('G')));
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let Mode::Preview(preview) = &app.mode else {
+        panic!("preview should remain open");
+    };
+    assert!(preview.scroll > 1);
+    assert_ne!(preview.scroll, u16::MAX);
+    assert!(screen_text(&terminal).contains("line-12"));
+
+    for _ in 0..100 {
+        app.handle_key_event(key(KeyCode::Up));
+    }
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(matches!(
+        app.mode,
+        Mode::Preview(BodyPreview { scroll: 0, .. })
+    ));
+    assert!(screen_text(&terminal).contains("Preview title"));
+
+    app.handle_key_event(key(KeyCode::Esc));
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+    assert!(!screen_text(&terminal).contains("line-00"));
+    assert_eq!(terminal.backend().buffer()[(3, 3)].symbol(), "≡");
+}
+
+#[test]
+fn preview_mouse_wheel_scrolls_but_other_mouse_input_cannot_reach_the_list() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "preview",
+            "one\ntwo\nthree\nfour\nfive\nsix",
+            false,
+            None,
+        )
+        .unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(todo.id));
+    app.handle_key_event(key(KeyCode::Enter));
+
+    app.handle_mouse_event(mouse(MouseEventKind::ScrollDown, 0, 0));
+    assert!(matches!(
+        app.mode,
+        Mode::Preview(BodyPreview { scroll: 1, .. })
+    ));
+    app.handle_mouse_event(mouse(MouseEventKind::ScrollUp, 0, 0));
+    assert!(matches!(
+        app.mode,
+        Mode::Preview(BodyPreview { scroll: 0, .. })
+    ));
+    app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+    assert!(matches!(app.mode, Mode::Preview(_)));
+    assert_eq!(app.focus, Some(Focus::Todo(todo.id)));
+}
+
+#[test]
+fn empty_body_reports_exact_message_and_refresh_repairs_stale_previews() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let empty = app
+        .store
+        .insert_todo("refs/heads/main", "empty", None)
+        .unwrap();
+    let body = app
+        .store
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "body",
+            "preview me",
+            false,
+            Some(empty.id),
+        )
+        .unwrap();
+    app.reload();
+
+    app.focus = Some(Focus::Todo(empty.id));
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(app.mode, Mode::Normal));
+    assert_eq!(app.error.as_deref(), Some("Todo has no body"));
+
+    app.focus = Some(Focus::Todo(body.id));
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(app.mode, Mode::Preview(_)));
+    app.store.update_todo(body.id, &body.title, "").unwrap();
+    app.reload();
+    assert!(matches!(app.mode, Mode::Normal));
+
+    app.store
+        .update_todo(body.id, &body.title, "restored")
+        .unwrap();
+    app.reload();
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(app.mode, Mode::Preview(_)));
+    app.store.delete_todo(body.id).unwrap();
+    app.reload();
+    assert!(matches!(app.mode, Mode::Normal));
+}
+
+#[test]
+fn preview_rendering_handles_tiny_terminal_sizes_without_panicking() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let todo = app
+        .store
+        .insert_todo_with_completion("refs/heads/main", "title", "body", false, None)
+        .unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(todo.id));
+    app.handle_key_event(key(KeyCode::Enter));
+
+    for width in 1..=4 {
+        for height in 1..=4 {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+        }
+    }
 }

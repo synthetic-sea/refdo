@@ -299,7 +299,7 @@ fn clear_confirmation_deletes_every_target_branch_todo_and_persists() {
     let mut app = app_with_sections(vec![section("main"), section("feature")]);
     let main_completed = app
         .store
-        .insert_todo_with_completion("refs/heads/main", "main completed", true, None)
+        .insert_todo_with_completion("refs/heads/main", "main completed", "", true, None)
         .unwrap();
     app.store
         .insert_todo(
@@ -310,7 +310,7 @@ fn clear_confirmation_deletes_every_target_branch_todo_and_persists() {
         .unwrap();
     let feature = app
         .store
-        .insert_todo_with_completion("refs/heads/feature", "feature completed", true, None)
+        .insert_todo_with_completion("refs/heads/feature", "feature completed", "", true, None)
         .unwrap();
     app.reload();
     app.focus = Some(Focus::Todo(main_completed.id));
@@ -679,7 +679,7 @@ fn dispatch_uses_todo_captured_when_command_line_opened() {
     wait_for_dispatch_footer(&mut app, "dispatch: 'record' completed");
     assert_eq!(
         fs::read_to_string(directory.path().join("dispatch-content")).unwrap(),
-        "captured todo"
+        "# captured todo"
     );
 }
 
@@ -1114,7 +1114,7 @@ fn command_line_open_from_select_mode_captures_selected_todos_in_display_order_a
 }
 
 #[test]
-fn dispatch_multiple_selected_todos_formats_as_markdown_list_in_displayed_order() {
+fn dispatch_multiple_selected_todos_formats_complete_markdown_in_displayed_order() {
     let directory = TestDirectory::new();
     let mut main = section("main");
     main.worktree_path = directory.path().to_owned();
@@ -1125,7 +1125,13 @@ fn dispatch_multiple_selected_todos_formats_as_markdown_list_in_displayed_order(
     );
     let t1 = app
         .store
-        .insert_todo("refs/heads/main", "first item\ncontinuation", None)
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "first item\ncontinuation",
+            "First body\n\nwith Markdown",
+            false,
+            None,
+        )
         .unwrap();
     let t2 = app
         .store
@@ -1150,12 +1156,12 @@ fn dispatch_multiple_selected_todos_formats_as_markdown_list_in_displayed_order(
 
     assert_eq!(
         fs::read_to_string(directory.path().join("dispatch-content")).unwrap(),
-        "- first item\n  continuation\n- third item"
+        "# first item\n# continuation\n\nFirst body\n\nwith Markdown\n\n# third item"
     );
 }
 
 #[test]
-fn dispatch_single_selected_todo_preserves_plain_title_byte_for_byte() {
+fn dispatch_single_selected_todo_sends_complete_markdown_byte_for_byte() {
     let directory = TestDirectory::new();
     let mut main = section("main");
     main.worktree_path = directory.path().to_owned();
@@ -1166,7 +1172,13 @@ fn dispatch_single_selected_todo_preserves_plain_title_byte_for_byte() {
     );
     let t1 = app
         .store
-        .insert_todo("refs/heads/main", "single plain title", None)
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "single $HOME\n$(touch injected) '\"",
+            "## Body\n\n`echo $HOME`\ntrailing",
+            false,
+            None,
+        )
         .unwrap();
     app.reload();
 
@@ -1179,7 +1191,54 @@ fn dispatch_single_selected_todo_preserves_plain_title_byte_for_byte() {
 
     assert_eq!(
         fs::read_to_string(directory.path().join("dispatch-content")).unwrap(),
-        "single plain title"
+        "# single $HOME\n# $(touch injected) '\"\n\n## Body\n\n`echo $HOME`\ntrailing"
+    );
+    assert!(!directory.path().join("injected").exists());
+}
+
+#[test]
+fn branch_generator_and_dispatch_receive_identical_complete_markdown() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(
+        vec![main],
+        "record",
+        "printf '%s' {{CONTENT}} > dispatch-content; printf '%s' {{BRANCH}} > branch-name",
+    );
+    app.dispatch = DispatchController::new(DispatchSettings {
+        generate_branch_name_command: Some(
+            "printf '%s' {{CONTENT}} > generator-content; printf 'generated/name\\n'".to_owned(),
+        ),
+    });
+    let todo = app
+        .store
+        .insert_todo_with_completion(
+            "refs/heads/main",
+            "Generate branch",
+            "Complete **Markdown** body",
+            false,
+            None,
+        )
+        .unwrap();
+    app.reload();
+    app.focus = Some(Focus::Todo(todo.id));
+
+    run_command(&mut app, "dispatch record");
+    wait_for_dispatch_footer(&mut app, "dispatch: 'record' completed");
+
+    let expected = "# Generate branch\n\nComplete **Markdown** body";
+    assert_eq!(
+        fs::read_to_string(directory.path().join("generator-content")).unwrap(),
+        expected
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("dispatch-content")).unwrap(),
+        expected
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("branch-name")).unwrap(),
+        "generated/name"
     );
 }
 

@@ -214,34 +214,28 @@ impl App {
         if target_todos.is_empty() {
             return Err("dispatch: no todo selected");
         }
-        let mut titles = Vec::with_capacity(target_todos.len());
-        for target_id in target_todos {
+        let mut content = String::new();
+        for (todo_index, target_id) in target_todos.iter().enumerate() {
             let todo = self
                 .todos
                 .iter()
                 .find(|todo| todo.id == *target_id)
                 .ok_or("dispatch: selected todo no longer exists")?;
-            titles.push(&todo.title);
-        }
-        let content = if titles.len() == 1 {
-            titles[0].clone()
-        } else {
-            let mut formatted = String::new();
-            for (index, title) in titles.iter().enumerate() {
-                if index > 0 {
-                    formatted.push('\n');
-                }
-                for (line_index, line) in title.split('\n').enumerate() {
-                    if line_index == 0 {
-                        formatted.push_str("- ");
-                    } else {
-                        formatted.push_str("\n  ");
-                    }
-                    formatted.push_str(line);
-                }
+            if todo_index > 0 {
+                content.push_str("\n\n");
             }
-            formatted
-        };
+            for (line_index, line) in todo.title.split('\n').enumerate() {
+                if line_index > 0 {
+                    content.push('\n');
+                }
+                content.push_str("# ");
+                content.push_str(line);
+            }
+            if !todo.body.is_empty() {
+                content.push_str("\n\n");
+                content.push_str(&todo.body);
+            }
+        }
 
         let section = target_branch
             .and_then(|branch_ref| {

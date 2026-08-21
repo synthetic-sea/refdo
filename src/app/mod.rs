@@ -2,6 +2,7 @@ mod actions;
 mod commands;
 mod dispatch;
 mod events;
+mod external_editor;
 mod navigation;
 mod text_input;
 mod ui;
@@ -16,10 +17,12 @@ use std::{
 use crossterm::clipboard::CopyToClipboard;
 
 use ratatui::{
-    DefaultTerminal, Frame,
+    DefaultTerminal, Frame, Terminal,
+    backend::Backend,
     crossterm::{
         event::{DisableMouseCapture, EnableMouseCapture},
         execute,
+        terminal::{EnterAlternateScreen, enable_raw_mode},
     },
     layout::{Position, Rect},
     style::Style,
@@ -42,6 +45,7 @@ const UNKNOWN_DATA_VERSION: i64 = -1;
 enum Mode {
     Normal,
     Select(SelectState),
+    Preview(BodyPreview),
     Insert(Editor),
     Command(CommandLine),
     ConfirmClear(ClearConfirmation),
@@ -53,6 +57,7 @@ impl Mode {
         match self {
             Self::Normal => " NORMAL ",
             Self::Select(_) => " SELECT ",
+            Self::Preview(_) => " PREVIEW ",
             Self::Insert(_) => " INSERT ",
             Self::Command(_) => " COMMAND ",
             Self::ConfirmClear(_) | Self::ConfirmDispatchTrust(_) => " CONFIRM ",
@@ -64,6 +69,7 @@ impl Mode {
             Self::Insert(editor) => Some(editor),
             Self::Normal
             | Self::Select(_)
+            | Self::Preview(_)
             | Self::Command(_)
             | Self::ConfirmClear(_)
             | Self::ConfirmDispatchTrust(_) => None,
@@ -74,7 +80,11 @@ impl Mode {
         match self {
             Self::ConfirmClear(confirmation) => Some(&confirmation.prompt),
             Self::ConfirmDispatchTrust(confirmation) => Some(&confirmation.prompt),
-            Self::Normal | Self::Select(_) | Self::Insert(_) | Self::Command(_) => None,
+            Self::Normal
+            | Self::Select(_)
+            | Self::Preview(_)
+            | Self::Insert(_)
+            | Self::Command(_) => None,
         }
     }
 }
@@ -83,6 +93,12 @@ impl Mode {
 struct SelectState {
     branch_ref: String,
     selected_todo_ids: HashSet<TodoId>,
+}
+
+#[derive(Clone, Debug)]
+struct BodyPreview {
+    todo_id: TodoId,
+    scroll: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,6 +184,7 @@ struct App {
     repository_error: Option<String>,
     last_repository_refresh: Instant,
     clipboard_request: Option<String>,
+    external_edit_request: Option<TodoId>,
     pointer_position: Option<Position>,
     last_todo_click: Option<TodoClick>,
     frame_area: Rect,
@@ -262,6 +279,7 @@ impl App {
             repository_error,
             last_repository_refresh: Instant::now(),
             clipboard_request: None,
+            external_edit_request: None,
             pointer_position: None,
             last_todo_click: None,
             frame_area: Rect::default(),
@@ -342,6 +360,9 @@ impl App {
 
         let result = (|| {
             while !self.exit {
+                if let Some(id) = self.external_edit_request.take() {
+                    self.edit_todo_externally(terminal, id)?;
+                }
                 terminal.draw(|frame| self.draw(frame))?;
                 self.handle_events()?;
                 self.flush_clipboard_request(terminal.backend_mut());
@@ -350,6 +371,77 @@ impl App {
         })();
         let disable_result = execute!(terminal.backend_mut(), DisableMouseCapture);
         result.and(disable_result)
+    }
+
+    fn edit_todo_externally(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        id: TodoId,
+    ) -> io::Result<()> {
+        let Some(todo) = self.todos.iter().find(|todo| todo.id == id) else {
+            self.error = Some(format!("todo {id} was not found"));
+            return Ok(());
+        };
+        let prepared = match external_editor::prepare(todo) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.error = Some(error);
+                return Ok(());
+            }
+        };
+
+        terminal.show_cursor()?;
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+        ratatui::try_restore()?;
+
+        let launch_result = prepared.launch();
+        let resume_result = (|| {
+            enable_raw_mode()?;
+            execute!(
+                terminal.backend_mut(),
+                EnterAlternateScreen,
+                EnableMouseCapture
+            )?;
+            terminal.hide_cursor()?;
+            terminal.autoresize()?;
+            clear_for_full_redraw(terminal)?;
+            Ok::<(), io::Error>(())
+        })();
+        if let Err(error) = resume_result {
+            let message = prepared.preserve(&format!("terminal restoration failed: {error}"));
+            return Err(io::Error::other(message));
+        }
+
+        let status = match launch_result {
+            Ok(status) => status,
+            Err(error) => {
+                self.error = Some(prepared.preserve(&format!("could not launch editor: {error}")));
+                return Ok(());
+            }
+        };
+        let edited = match prepared.finish(status) {
+            Ok(edited) => edited,
+            Err(error) => {
+                self.error = Some(error);
+                return Ok(());
+            }
+        };
+        self.persist_external_edit(id, edited);
+        Ok(())
+    }
+
+    fn persist_external_edit(&mut self, id: TodoId, edited: external_editor::EditedTodo) {
+        match self.store.update_todo(id, &edited.title, &edited.body) {
+            Ok(todo) => {
+                if let Some(existing) = self.todos.iter_mut().find(|todo| todo.id == id) {
+                    *existing = todo;
+                }
+                self.focus = Some(Focus::Todo(id));
+                self.error = None;
+                self.reveal_focus = true;
+            }
+            Err(error) => self.error = Some(edited.preserve(&error.to_string())),
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -407,6 +499,12 @@ impl App {
                 .or(self.error.as_deref()),
             &self.theme,
         );
+        let (mode, todos) = (&mut self.mode, &self.todos);
+        if let Mode::Preview(preview) = mode
+            && let Some(todo) = todos.iter().find(|todo| todo.id == preview.todo_id)
+        {
+            ui::render_body_preview(frame, preview, todo, &self.theme);
+        }
     }
 
     fn refresh_external(&mut self) {
@@ -424,6 +522,7 @@ impl App {
                 );
                 self.data_version = version;
                 self.repair_select_mode();
+                self.repair_preview_mode();
                 self.repair_focus();
             }
             Err(error) => self.error = Some(error.to_string()),
@@ -446,6 +545,7 @@ impl App {
                     self.todos.iter().map(|todo| todo.branch_ref.as_str()),
                 );
                 self.data_version = version;
+                self.repair_preview_mode();
                 true
             }
             Err(error) => {
@@ -509,6 +609,7 @@ impl App {
                 self.repository = discovered;
                 self.repository_error = None;
                 self.repair_select_mode();
+                self.repair_preview_mode();
                 self.repair_focus();
             }
             Err(error) => {
@@ -516,6 +617,14 @@ impl App {
             }
         }
     }
+}
+
+// `Terminal::clear` snapshots the cursor first. The editor handoff cannot rely on a cursor-position
+// response, so clear the display directly and reset Ratatui's comparison buffer for the next draw.
+fn clear_for_full_redraw<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    terminal.backend_mut().clear()?;
+    terminal.swap_buffers();
+    Ok(())
 }
 
 #[cfg(test)]
