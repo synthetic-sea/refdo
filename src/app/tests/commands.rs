@@ -31,7 +31,7 @@ fn command_mode_captures_branch_and_renders_text_and_cursor_in_footer() {
         command_line(&app).target_branch.as_deref(),
         Some("refs/heads/main")
     );
-    assert_eq!(command_line(&app).target_todo, None);
+    assert!(command_line(&app).target_todos.is_empty());
     let backend = TestBackend::new(30, 6);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -118,7 +118,7 @@ fn command_target_resolves_from_headers_and_todos_when_opened() {
         command_line(&app).target_branch.as_deref(),
         Some("refs/heads/main")
     );
-    assert_eq!(command_line(&app).target_todo, None);
+    assert!(command_line(&app).target_todos.is_empty());
     app.handle_key_event(key(KeyCode::Esc));
 
     app.focus = Some(Focus::Todo(todo.id));
@@ -127,12 +127,12 @@ fn command_target_resolves_from_headers_and_todos_when_opened() {
         command_line(&app).target_branch.as_deref(),
         Some("refs/heads/feature")
     );
-    assert_eq!(command_line(&app).target_todo, Some(todo.id));
+    assert_eq!(command_line(&app).target_todos, vec![todo.id]);
     app.handle_key_event(key(KeyCode::Esc));
     app.todos.clear();
     app.focus = Some(Focus::Todo(todo.id));
     app.handle_key_event(key(KeyCode::Char(':')));
-    assert_eq!(command_line(&app).target_todo, None);
+    assert!(command_line(&app).target_todos.is_empty());
 }
 
 #[test]
@@ -670,7 +670,7 @@ fn dispatch_uses_todo_captured_when_command_line_opened() {
     app.focus = Some(Focus::Todo(selected));
 
     app.handle_key_event(key(KeyCode::Char(':')));
-    assert_eq!(command_line(&app).target_todo, Some(selected));
+    assert_eq!(command_line(&app).target_todos, vec![selected]);
     app.focus = Some(Focus::Todo(other.id));
     type_text(&mut app, "dispatch record");
     app.handle_key_event(key(KeyCode::Enter));
@@ -1075,4 +1075,214 @@ fn selected_worktree_owns_its_dispatch_definition() {
             expected
         );
     }
+}
+
+#[test]
+fn command_line_open_from_select_mode_captures_selected_todos_in_display_order_and_exits_select_mode()
+ {
+    let mut app = app_with_sections(vec![section("main")]);
+    let t1 = app
+        .store
+        .insert_todo("refs/heads/main", "first", None)
+        .unwrap();
+    let t2 = app
+        .store
+        .insert_todo("refs/heads/main", "second", Some(t1.id))
+        .unwrap();
+    let t3 = app
+        .store
+        .insert_todo("refs/heads/main", "third", Some(t2.id))
+        .unwrap();
+    app.reload();
+
+    // Enter select mode on t1, navigate to t3 and select it
+    app.focus = Some(Focus::Todo(t1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    app.handle_key_event(key(KeyCode::Char(' ')));
+
+    // Open command line with ':'
+    app.handle_key_event(key(KeyCode::Char(':')));
+
+    assert!(matches!(&app.mode, Mode::Command(_)));
+    assert_eq!(
+        command_line(&app).target_branch.as_deref(),
+        Some("refs/heads/main")
+    );
+    assert_eq!(command_line(&app).target_todos, vec![t1.id, t3.id]);
+}
+
+#[test]
+fn dispatch_multiple_selected_todos_formats_as_markdown_list_in_displayed_order() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(
+        vec![main],
+        "record",
+        "printf '%s' {{CONTENT}} > dispatch-content",
+    );
+    let t1 = app
+        .store
+        .insert_todo("refs/heads/main", "first item\ncontinuation", None)
+        .unwrap();
+    let t2 = app
+        .store
+        .insert_todo("refs/heads/main", "second item", Some(t1.id))
+        .unwrap();
+    let t3 = app
+        .store
+        .insert_todo("refs/heads/main", "third item", Some(t2.id))
+        .unwrap();
+    app.reload();
+
+    // Enter select mode on t3 first, then toggle t1 (selecting {t1, t3} non-contiguously)
+    app.focus = Some(Focus::Todo(t3.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    app.handle_key_event(key(KeyCode::Char('k')));
+    app.handle_key_event(key(KeyCode::Char('k')));
+    app.handle_key_event(key(KeyCode::Char(' ')));
+
+    run_command(&mut app, "dispatch record");
+    assert_eq!(app.error.as_deref(), Some("dispatch: running 'record'"));
+    wait_for_dispatch_footer(&mut app, "dispatch: 'record' completed");
+
+    assert_eq!(
+        fs::read_to_string(directory.path().join("dispatch-content")).unwrap(),
+        "- first item\n  continuation\n- third item"
+    );
+}
+
+#[test]
+fn dispatch_single_selected_todo_preserves_plain_title_byte_for_byte() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(
+        vec![main],
+        "record",
+        "printf '%s' {{CONTENT}} > dispatch-content",
+    );
+    let t1 = app
+        .store
+        .insert_todo("refs/heads/main", "single plain title", None)
+        .unwrap();
+    app.reload();
+
+    app.focus = Some(Focus::Todo(t1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+
+    run_command(&mut app, "dispatch record");
+    assert_eq!(app.error.as_deref(), Some("dispatch: running 'record'"));
+    wait_for_dispatch_footer(&mut app, "dispatch: 'record' completed");
+
+    assert_eq!(
+        fs::read_to_string(directory.path().join("dispatch-content")).unwrap(),
+        "single plain title"
+    );
+}
+
+#[test]
+fn dispatch_empty_selection_fails_with_no_todo_selected() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(vec![main], "record", "true");
+    let t1 = app
+        .store
+        .insert_todo("refs/heads/main", "only item", None)
+        .unwrap();
+    app.reload();
+
+    app.focus = Some(Focus::Todo(t1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    // Toggle off t1 -> empty selection
+    app.handle_key_event(key(KeyCode::Char(' ')));
+
+    run_command(&mut app, "dispatch record");
+    assert_eq!(app.error.as_deref(), Some("dispatch: no todo selected"));
+}
+
+#[test]
+fn dispatch_fails_atomically_if_any_captured_selected_todo_disappears() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_dispatch(
+        vec![main],
+        "record",
+        "printf '%s' {{CONTENT}} > dispatch-content",
+    );
+    let t1 = app
+        .store
+        .insert_todo("refs/heads/main", "first item", None)
+        .unwrap();
+    let t2 = app
+        .store
+        .insert_todo("refs/heads/main", "second item", Some(t1.id))
+        .unwrap();
+    app.reload();
+
+    // Select both t1 and t2
+    app.focus = Some(Focus::Todo(t1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    app.handle_key_event(key(KeyCode::Char(' ')));
+
+    // Open command line (captures t1 and t2)
+    app.handle_key_event(key(KeyCode::Char(':')));
+    assert_eq!(command_line(&app).target_todos, vec![t1.id, t2.id]);
+
+    // Delete t2 from todos
+    app.todos.retain(|todo| todo.id != t2.id);
+
+    type_text(&mut app, "dispatch record");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: selected todo no longer exists")
+    );
+    assert!(!directory.path().join("dispatch-content").exists());
+}
+
+#[test]
+fn dispatch_trust_with_multiple_selected_todos_uses_common_section() {
+    let directory = TestDirectory::new();
+    let mut main = section("main");
+    main.worktree_path = directory.path().to_owned();
+    let mut app = app_with_sections(vec![main]);
+    let digest = write_dispatch_config(
+        directory.path(),
+        &[("record", "printf test > dispatch-content")],
+    );
+    let t1 = app
+        .store
+        .insert_todo("refs/heads/main", "item 1", None)
+        .unwrap();
+    let _t2 = app
+        .store
+        .insert_todo("refs/heads/main", "item 2", Some(t1.id))
+        .unwrap();
+    app.reload();
+
+    app.focus = Some(Focus::Todo(t1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    app.handle_key_event(key(KeyCode::Char(' ')));
+
+    run_command(&mut app, "dispatch-trust");
+    assert!(matches!(
+        &app.mode,
+        Mode::ConfirmDispatchTrust(confirmation)
+            if confirmation.digest == digest
+                && confirmation.display_name == "main"
+                && confirmation.prompt == "dispatch: trust .refdo.toml from main? [y/N]"
+    ));
+    app.handle_key_event(key(KeyCode::Char('y')));
+    assert_eq!(
+        app.error.as_deref(),
+        Some("dispatch: trusted .refdo.toml for main")
+    );
 }

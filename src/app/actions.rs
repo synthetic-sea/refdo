@@ -1,4 +1,6 @@
-use super::{App, Editor, EditorTarget, Focus, Mode};
+use std::collections::HashSet;
+
+use super::{App, Editor, EditorTarget, Focus, Mode, SelectState};
 
 impl App {
     pub(in crate::app) fn copy_focused_todo(&mut self) {
@@ -240,5 +242,70 @@ impl App {
             }
             Err(error) => self.error = Some(error.to_string()),
         }
+    }
+
+    pub(in crate::app) fn enter_select_mode(&mut self) {
+        let (branch_ref, focus_todo, selected_todo_ids) = match self.focus.as_ref() {
+            Some(Focus::Todo(id)) => {
+                let Some(todo) = self.todos.iter().find(|todo| todo.id == *id) else {
+                    return;
+                };
+                let mut selected = HashSet::new();
+                selected.insert(*id);
+                (todo.branch_ref.clone(), *id, selected)
+            }
+            Some(Focus::Branch(branch_ref)) => {
+                let Some(first_todo) = self
+                    .todos
+                    .iter()
+                    .find(|todo| todo.branch_ref == *branch_ref)
+                else {
+                    return;
+                };
+                (branch_ref.clone(), first_todo.id, HashSet::new())
+            }
+            None => {
+                let Some(first_todo) = self.repository.sections.iter().find_map(|section| {
+                    self.todos
+                        .iter()
+                        .find(|todo| todo.branch_ref == section.full_ref_name)
+                }) else {
+                    return;
+                };
+                (first_todo.branch_ref.clone(), first_todo.id, HashSet::new())
+            }
+        };
+
+        self.focus = Some(Focus::Todo(focus_todo));
+        self.mode = Mode::Select(SelectState {
+            branch_ref,
+            selected_todo_ids,
+        });
+        self.pending_operator = None;
+        self.error = None;
+        self.reveal_focus = true;
+    }
+
+    pub(in crate::app) fn toggle_focused_selection(&mut self) {
+        let Mode::Select(select_state) = &mut self.mode else {
+            return;
+        };
+        let Some(Focus::Todo(id)) = self.focus.as_ref() else {
+            return;
+        };
+        let Some(todo) = self.todos.iter().find(|todo| todo.id == *id) else {
+            return;
+        };
+        if todo.branch_ref != select_state.branch_ref {
+            return;
+        }
+        if !select_state.selected_todo_ids.remove(id) {
+            select_state.selected_todo_ids.insert(*id);
+        }
+    }
+
+    pub(in crate::app) fn exit_select_mode(&mut self) {
+        self.mode = Mode::Normal;
+        self.error = None;
     }
 }

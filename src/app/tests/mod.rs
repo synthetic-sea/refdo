@@ -8,7 +8,7 @@ mod ui;
 
 use super::{
     App, ClearConfirmation, CommandLine, DispatchController, Editor, EditorTarget, Focus, Mode,
-    UNKNOWN_DATA_VERSION,
+    PendingOperator, UNKNOWN_DATA_VERSION,
 };
 use crate::config::{DispatchConfigDigest, DispatchSettings, load_repository_dispatch_config};
 use crate::repository::{BranchSection, RepositoryContext};

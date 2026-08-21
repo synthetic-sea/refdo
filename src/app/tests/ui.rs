@@ -597,3 +597,219 @@ fn very_narrow_terminals_render_wrapped_todos_without_panicking() {
         terminal.draw(|frame| app.draw(frame)).unwrap();
     }
 }
+
+#[test]
+fn select_mode_renders_circle_markers_in_active_section_and_checkboxes_in_other_sections() {
+    let mut app = app_with_sections(vec![section("main"), section("topic")]);
+    let m1 = app
+        .store
+        .insert_todo("refs/heads/main", "main 1", None)
+        .unwrap();
+    let m2 = app
+        .store
+        .insert_todo("refs/heads/main", "main 2", Some(m1.id))
+        .unwrap();
+    let _m3 = app
+        .store
+        .insert_todo("refs/heads/main", "main 3", Some(m2.id))
+        .unwrap();
+    app.store.toggle_todo(m2.id).unwrap();
+
+    let t1 = app
+        .store
+        .insert_todo("refs/heads/topic", "topic 1", None)
+        .unwrap();
+    let t2 = app
+        .store
+        .insert_todo("refs/heads/topic", "topic 2", Some(t1.id))
+        .unwrap();
+    app.store.toggle_todo(t2.id).unwrap();
+
+    app.reload();
+
+    // Focus m1, enter select mode, toggle m3
+    app.focus = Some(Focus::Todo(m1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    app.handle_key_event(key(KeyCode::Char(' ')));
+
+    let backend = TestBackend::new(40, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    // Row 2: main (header)
+    assert!(row_text(&terminal, 2).contains("main"));
+
+    // Row 3: main 1 (selected) -> ●
+    assert!(row_text(&terminal, 3).contains("● main 1"));
+    assert_eq!(terminal.backend().buffer()[(5, 3)].symbol(), "●");
+
+    // Row 4: main 2 (unselected, though completed) -> ○
+    assert!(row_text(&terminal, 4).contains("○ main 2"));
+    assert_eq!(terminal.backend().buffer()[(5, 4)].symbol(), "○");
+
+    // Row 5: main 3 (selected) -> ●
+    assert!(row_text(&terminal, 5).contains("● main 3"));
+    assert_eq!(terminal.backend().buffer()[(5, 5)].symbol(), "●");
+
+    // Row 6: topic (header)
+    assert!(row_text(&terminal, 6).contains("topic"));
+
+    // Row 7: topic 1 (in other section, incomplete) -> 󰄱
+    assert!(row_text(&terminal, 7).contains("󰄱 topic 1"));
+    assert_eq!(terminal.backend().buffer()[(5, 7)].symbol(), "󰄱");
+
+    // Row 8: topic 2 (in other section, completed) -> 󰄲
+    assert!(row_text(&terminal, 8).contains("󰄲 topic 2"));
+    assert_eq!(terminal.backend().buffer()[(5, 8)].symbol(), "󰄲");
+}
+
+#[test]
+fn select_mode_renders_independent_focus_and_hover_background_styling() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let m1 = app
+        .store
+        .insert_todo("refs/heads/main", "main 1", None)
+        .unwrap();
+    let m2 = app
+        .store
+        .insert_todo("refs/heads/main", "main 2", Some(m1.id))
+        .unwrap();
+    let _m3 = app
+        .store
+        .insert_todo("refs/heads/main", "main 3", Some(m2.id))
+        .unwrap();
+    app.reload();
+
+    let theme = app.theme;
+
+    // Enter select mode on m1, move focus to m2
+    app.focus = Some(Focus::Todo(m1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    assert_eq!(app.focus, Some(Focus::Todo(m2.id)));
+
+    // Hover row 5 (main 3)
+    app.handle_mouse_event(mouse(MouseEventKind::Moved, 2, 5));
+
+    let backend = TestBackend::new(40, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    // Row 3 (m1, selected in set, unfocused) -> ● marker, normal background
+    assert_eq!(terminal.backend().buffer()[(5, 3)].symbol(), "●");
+    assert_eq!(terminal.backend().buffer()[(2, 3)].bg, theme.background);
+
+    // Row 4 (m2, unselected in set, focused) -> ○ marker, selection_background
+    assert_eq!(terminal.backend().buffer()[(5, 4)].symbol(), "○");
+    assert_eq!(
+        terminal.backend().buffer()[(2, 4)].bg,
+        theme.selection_background
+    );
+
+    // Row 5 (m3, unselected in set, unfocused, hovered) -> ○ marker, hover_background
+    assert_eq!(terminal.backend().buffer()[(5, 5)].symbol(), "○");
+    assert_eq!(
+        terminal.backend().buffer()[(2, 5)].bg,
+        theme.hover_background
+    );
+}
+
+#[test]
+fn select_mode_footer_renders_exact_count_and_appended_error_message() {
+    let mut app = app_with_sections(vec![section("main")]);
+    let m1 = app
+        .store
+        .insert_todo("refs/heads/main", "main 1", None)
+        .unwrap();
+    let _m2 = app
+        .store
+        .insert_todo("refs/heads/main", "main 2", Some(m1.id))
+        .unwrap();
+    app.reload();
+
+    app.focus = Some(Focus::Todo(m1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    app.handle_key_event(key(KeyCode::Char(' ')));
+
+    let backend = TestBackend::new(60, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    let footer = row_text(&terminal, 5);
+    assert!(
+        footer.starts_with(" SELECT · 2 selected"),
+        "unexpected footer: {footer}"
+    );
+
+    // Appended generic error
+    app.error = Some("something failed".to_owned());
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let footer_with_error = row_text(&terminal, 5);
+    assert!(
+        footer_with_error.starts_with(" SELECT · 2 selected something failed"),
+        "unexpected footer with error: {footer_with_error}"
+    );
+
+    // Repository error takes precedence over generic error
+    app.repository_error = Some("repository: git error".to_owned());
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let footer_with_repo_error = row_text(&terminal, 5);
+    assert!(
+        footer_with_repo_error.starts_with(" SELECT · 2 selected repository: git error"),
+        "unexpected footer with repo error: {footer_with_repo_error}"
+    );
+}
+
+#[test]
+fn select_mode_left_click_selects_the_rendered_row_within_branch() {
+    let mut app = app_with_sections(vec![section("main"), section("topic")]);
+    let m1 = app
+        .store
+        .insert_todo("refs/heads/main", "main 1", None)
+        .unwrap();
+    let m2 = app
+        .store
+        .insert_todo("refs/heads/main", "main 2", Some(m1.id))
+        .unwrap();
+    let _m3 = app
+        .store
+        .insert_todo("refs/heads/main", "main 3", Some(m2.id))
+        .unwrap();
+    let _t1 = app
+        .store
+        .insert_todo("refs/heads/topic", "topic 1", None)
+        .unwrap();
+    app.reload();
+
+    // Enter select mode on m1
+    app.focus = Some(Focus::Todo(m1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+    assert!(matches!(&app.mode, Mode::Select(_)));
+
+    let backend = TestBackend::new(40, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    // Click on row 4 (m2, "main 2")
+    app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 4));
+    assert_eq!(app.focus, Some(Focus::Todo(m2.id)));
+    assert!(matches!(&app.mode, Mode::Select(_)));
+
+    // Click on row 2 (main header) -> ignored in select mode
+    app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+    assert_eq!(app.focus, Some(Focus::Todo(m2.id)));
+
+    // Click on row 7 (topic 1 in other section) -> ignored in select mode
+    app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 2, 7));
+    assert_eq!(app.focus, Some(Focus::Todo(m2.id)));
+
+    // Double-clicking m2 does not open editor in select mode
+    for _ in 0..2 {
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 10, 4));
+    }
+    assert_eq!(app.focus, Some(Focus::Todo(m2.id)));
+    assert!(matches!(&app.mode, Mode::Select(_)));
+}

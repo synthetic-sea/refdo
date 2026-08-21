@@ -20,7 +20,7 @@ launch_agent_in_worktree() {
   quoted_agent=$(printf '%s' "$AGENT_EXECUTABLE" | jq -Rrs @sh)
   quoted_prompt=$(printf '%s' "$INITIAL_PROMPT" | jq -Rrs @sh)
 
-  herdr pane run "$pane_id" "$quoted_agent $quoted_prompt"
+  herdr pane run "$pane_id" "$quoted_agent -- $quoted_prompt"
 }
 
 if [ "${1:-}" = "--launch-worktree" ]; then

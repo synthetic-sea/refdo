@@ -9,13 +9,15 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::super::{Editor, Focus, Mode};
+use super::super::{Editor, Focus, Mode, SelectState};
 use super::layout::{DisplayRow, DisplayRowLayout, maximum_viewport_start};
 use crate::repository::BranchSection;
 use crate::theme::Theme;
 
 const INCOMPLETE_TODO_MARKER: &str = "󰄱";
 const COMPLETE_TODO_MARKER: &str = "󰄲";
+const SELECTED_TODO_MARKER: &str = "●";
+const UNSELECTED_TODO_MARKER: &str = "○";
 const TODO_PREFIX_WIDTH: u16 = 5;
 pub(in crate::app) fn render_status_bar(
     frame: &mut Frame,
@@ -78,20 +80,28 @@ pub(in crate::app) fn render_footer(
         return;
     }
 
-    let mode = Span::styled(
+    let mode_span = Span::styled(
         mode.label(),
         Style::default()
             .fg(theme.mode_foreground)
             .bg(theme.mode_background)
             .add_modifier(Modifier::BOLD),
     );
-    let message = message
-        .map(|message| Span::styled(format!(" {message}"), Style::default().fg(theme.foreground)))
-        .unwrap_or_default();
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![mode, message])).style(footer_style),
-        area,
-    );
+    let mut spans = vec![mode_span];
+    if let Mode::Select(select_state) = mode {
+        let count = select_state.selected_todo_ids.len();
+        spans.push(Span::styled(
+            format!("· {count} selected"),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+    if let Some(message) = message {
+        spans.push(Span::styled(
+            format!(" {message}"),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(footer_style), area);
 }
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app) fn render_branch_sections(
@@ -101,6 +111,7 @@ pub(in crate::app) fn render_branch_sections(
     focus: Option<&Focus>,
     hovered: Option<&Focus>,
     editor: Option<&Editor>,
+    select_state: Option<&SelectState>,
     viewport_start: usize,
     theme: &Theme,
 ) {
@@ -161,7 +172,19 @@ pub(in crate::app) fn render_branch_sections(
                 } else {
                     theme.background
                 };
-                let marker = if todo.completed {
+                let marker = if let Some(select_state) = select_state {
+                    if select_state.branch_ref == todo.branch_ref {
+                        if select_state.selected_todo_ids.contains(&todo.id) {
+                            SELECTED_TODO_MARKER
+                        } else {
+                            UNSELECTED_TODO_MARKER
+                        }
+                    } else if todo.completed {
+                        COMPLETE_TODO_MARKER
+                    } else {
+                        INCOMPLETE_TODO_MARKER
+                    }
+                } else if todo.completed {
                     COMPLETE_TODO_MARKER
                 } else {
                     INCOMPLETE_TODO_MARKER

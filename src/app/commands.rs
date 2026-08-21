@@ -15,30 +15,50 @@ struct ResolvedDispatchTarget {
 
 impl App {
     pub(in crate::app) fn open_command_line(&mut self) {
-        let target_branch = match self.focus.as_ref() {
-            Some(Focus::Branch(branch_ref))
-                if self
-                    .repository
-                    .sections
+        let (target_branch, target_todos) = match &self.mode {
+            Mode::Select(select_state) => {
+                let target_branch = Some(select_state.branch_ref.clone());
+                let target_todos = self
+                    .todos
                     .iter()
-                    .any(|section| section.full_ref_name == *branch_ref) =>
-            {
-                Some(branch_ref.clone())
+                    .filter(|todo| {
+                        todo.branch_ref == select_state.branch_ref
+                            && select_state.selected_todo_ids.contains(&todo.id)
+                    })
+                    .map(|todo| todo.id)
+                    .collect::<Vec<_>>();
+                (target_branch, target_todos)
             }
-            Some(Focus::Todo(id)) => self
-                .todos
-                .iter()
-                .find(|todo| todo.id == *id)
-                .map(|todo| todo.branch_ref.clone()),
-            _ => None,
-        };
-        let target_todo = match self.focus.as_ref() {
-            Some(Focus::Todo(id)) if self.todos.iter().any(|todo| todo.id == *id) => Some(*id),
-            _ => None,
+            _ => {
+                let target_branch = match self.focus.as_ref() {
+                    Some(Focus::Branch(branch_ref))
+                        if self
+                            .repository
+                            .sections
+                            .iter()
+                            .any(|section| section.full_ref_name == *branch_ref) =>
+                    {
+                        Some(branch_ref.clone())
+                    }
+                    Some(Focus::Todo(id)) => self
+                        .todos
+                        .iter()
+                        .find(|todo| todo.id == *id)
+                        .map(|todo| todo.branch_ref.clone()),
+                    _ => None,
+                };
+                let target_todos = match self.focus.as_ref() {
+                    Some(Focus::Todo(id)) if self.todos.iter().any(|todo| todo.id == *id) => {
+                        vec![*id]
+                    }
+                    _ => Vec::new(),
+                };
+                (target_branch, target_todos)
+            }
         };
         self.mode = Mode::Command(CommandLine {
             target_branch,
-            target_todo,
+            target_todos,
             text: String::new(),
             cursor: 0,
         });
@@ -96,7 +116,7 @@ impl App {
         };
         let name = command.text.trim().to_owned();
         let target_branch = command.target_branch.clone();
-        let target_todo = command.target_todo;
+        let target_todos = command.target_todos.clone();
         self.mode = Mode::Normal;
 
         if name.is_empty() {
@@ -115,7 +135,7 @@ impl App {
                     self.error = Some("dispatch: expected :dispatch <name>".to_owned());
                     return;
                 }
-                self.start_dispatch(dispatch_name, target_todo, target_branch);
+                self.start_dispatch(dispatch_name, &target_todos, target_branch.as_deref());
                 return;
             }
             Some("dispatch-trust") => {
@@ -123,7 +143,7 @@ impl App {
                     self.error = Some("dispatch-trust: expected :dispatch-trust".to_owned());
                     return;
                 }
-                self.begin_dispatch_trust(target_todo, target_branch);
+                self.begin_dispatch_trust(&target_todos, target_branch.as_deref());
                 return;
             }
             Some(_) | None => {}
@@ -188,16 +208,41 @@ impl App {
 
     fn resolve_dispatch_target(
         &self,
-        target_todo: Option<TodoId>,
-        target_branch: Option<String>,
+        target_todos: &[TodoId],
+        target_branch: Option<&str>,
     ) -> Result<ResolvedDispatchTarget, &'static str> {
-        let target_todo = target_todo.ok_or("dispatch: no todo selected")?;
-        let content = self
-            .todos
-            .iter()
-            .find(|todo| todo.id == target_todo)
-            .map(|todo| todo.title.clone())
-            .ok_or("dispatch: selected todo no longer exists")?;
+        if target_todos.is_empty() {
+            return Err("dispatch: no todo selected");
+        }
+        let mut titles = Vec::with_capacity(target_todos.len());
+        for target_id in target_todos {
+            let todo = self
+                .todos
+                .iter()
+                .find(|todo| todo.id == *target_id)
+                .ok_or("dispatch: selected todo no longer exists")?;
+            titles.push(&todo.title);
+        }
+        let content = if titles.len() == 1 {
+            titles[0].clone()
+        } else {
+            let mut formatted = String::new();
+            for (index, title) in titles.iter().enumerate() {
+                if index > 0 {
+                    formatted.push('\n');
+                }
+                for (line_index, line) in title.split('\n').enumerate() {
+                    if line_index == 0 {
+                        formatted.push_str("- ");
+                    } else {
+                        formatted.push_str("\n  ");
+                    }
+                    formatted.push_str(line);
+                }
+            }
+            formatted
+        };
+
         let section = target_branch
             .and_then(|branch_ref| {
                 self.repository
@@ -224,13 +269,8 @@ impl App {
         }
     }
 
-    fn start_dispatch(
-        &mut self,
-        name: &str,
-        target_todo: Option<TodoId>,
-        target_branch: Option<String>,
-    ) {
-        let target = match self.resolve_dispatch_target(target_todo, target_branch) {
+    fn start_dispatch(&mut self, name: &str, target_todos: &[TodoId], target_branch: Option<&str>) {
+        let target = match self.resolve_dispatch_target(target_todos, target_branch) {
             Ok(target) => target,
             Err(error) => {
                 self.error = Some(error.to_owned());
@@ -276,8 +316,8 @@ impl App {
         }
     }
 
-    fn begin_dispatch_trust(&mut self, target_todo: Option<TodoId>, target_branch: Option<String>) {
-        let target = match self.resolve_dispatch_target(target_todo, target_branch) {
+    fn begin_dispatch_trust(&mut self, target_todos: &[TodoId], target_branch: Option<&str>) {
+        let target = match self.resolve_dispatch_target(target_todos, target_branch) {
             Ok(target) => target,
             Err(error) => {
                 self.error = Some(error.to_owned());

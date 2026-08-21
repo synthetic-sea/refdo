@@ -7,6 +7,7 @@ mod text_input;
 mod ui;
 
 use std::{
+    collections::HashSet,
     io,
     path::PathBuf,
     time::{Duration, Instant},
@@ -40,6 +41,7 @@ const UNKNOWN_DATA_VERSION: i64 = -1;
 #[derive(Clone, Debug)]
 enum Mode {
     Normal,
+    Select(SelectState),
     Insert(Editor),
     Command(CommandLine),
     ConfirmClear(ClearConfirmation),
@@ -50,6 +52,7 @@ impl Mode {
     const fn label(&self) -> &'static str {
         match self {
             Self::Normal => " NORMAL ",
+            Self::Select(_) => " SELECT ",
             Self::Insert(_) => " INSERT ",
             Self::Command(_) => " COMMAND ",
             Self::ConfirmClear(_) | Self::ConfirmDispatchTrust(_) => " CONFIRM ",
@@ -60,6 +63,7 @@ impl Mode {
         match self {
             Self::Insert(editor) => Some(editor),
             Self::Normal
+            | Self::Select(_)
             | Self::Command(_)
             | Self::ConfirmClear(_)
             | Self::ConfirmDispatchTrust(_) => None,
@@ -70,9 +74,15 @@ impl Mode {
         match self {
             Self::ConfirmClear(confirmation) => Some(&confirmation.prompt),
             Self::ConfirmDispatchTrust(confirmation) => Some(&confirmation.prompt),
-            Self::Normal | Self::Insert(_) | Self::Command(_) => None,
+            Self::Normal | Self::Select(_) | Self::Insert(_) | Self::Command(_) => None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct SelectState {
+    branch_ref: String,
+    selected_todo_ids: HashSet<TodoId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,7 +113,7 @@ struct Editor {
 #[derive(Clone, Debug)]
 struct CommandLine {
     target_branch: Option<String>,
-    target_todo: Option<TodoId>,
+    target_todos: Vec<TodoId>,
     text: String,
     cursor: usize,
 }
@@ -372,6 +382,10 @@ impl App {
             .border_style(Style::default().fg(self.theme.mode_background))
             .padding(Padding::horizontal(1));
         frame.render_widget(content_block, content_area);
+        let select_state = match &self.mode {
+            Mode::Select(state) => Some(state),
+            _ => None,
+        };
         ui::render_branch_sections(
             frame,
             todo_area,
@@ -379,6 +393,7 @@ impl App {
             self.focus.as_ref(),
             hovered.as_ref(),
             self.mode.editor(),
+            select_state,
             self.viewport_start,
             &self.theme,
         );
@@ -408,6 +423,7 @@ impl App {
                     self.todos.iter().map(|todo| todo.branch_ref.as_str()),
                 );
                 self.data_version = version;
+                self.repair_select_mode();
                 self.repair_focus();
             }
             Err(error) => self.error = Some(error.to_string()),
@@ -492,6 +508,7 @@ impl App {
                 );
                 self.repository = discovered;
                 self.repository_error = None;
+                self.repair_select_mode();
                 self.repair_focus();
             }
             Err(error) => {

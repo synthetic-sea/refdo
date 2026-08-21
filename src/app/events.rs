@@ -11,7 +11,7 @@ use ratatui::{
     layout::Position,
 };
 
-use super::{App, DOUBLE_CLICK_INTERVAL, Mode, PendingOperator, TodoClick, text_input, ui};
+use super::{App, DOUBLE_CLICK_INTERVAL, Focus, Mode, PendingOperator, TodoClick, text_input, ui};
 
 impl App {
     pub(in crate::app) fn handle_events(&mut self) -> io::Result<()> {
@@ -53,7 +53,7 @@ impl App {
             }
             .min(maximum);
             self.reveal_focus = false;
-        } else if matches!(&self.mode, Mode::Normal)
+        } else if matches!(&self.mode, Mode::Normal | Mode::Select(_))
             && mouse_event.kind == MouseEventKind::Down(MouseButton::Left)
         {
             let area = ui::todo_viewport_area(self.frame_area);
@@ -71,8 +71,22 @@ impl App {
             } else {
                 (None, None)
             };
-            self.focus = focus;
 
+            if let Mode::Select(select_state) = &self.mode {
+                if let Some(Focus::Todo(id)) = focus {
+                    if self
+                        .todos
+                        .iter()
+                        .any(|todo| todo.id == id && todo.branch_ref == select_state.branch_ref)
+                    {
+                        self.focus = Some(Focus::Todo(id));
+                    }
+                }
+                self.last_todo_click = None;
+                return;
+            }
+
+            self.focus = focus;
             if let Some((id, cursor)) = todo_text_hit {
                 let now = Instant::now();
                 let is_double_click = self.last_todo_click.take().is_some_and(|previous| {
@@ -118,6 +132,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_focus(-1),
             KeyCode::Char(']') => self.move_section_focus(true),
             KeyCode::Char('[') => self.move_section_focus(false),
+            KeyCode::Char('v') => self.enter_select_mode(),
             KeyCode::Char('o') => self.open_create_editor(),
             KeyCode::Char(':') => self.open_command_line(),
             KeyCode::Char('i') => self.open_update_editor(None),
@@ -138,6 +153,22 @@ impl App {
         match &self.mode {
             Mode::Normal => {
                 self.handle_normal_key(key.code);
+                return;
+            }
+            Mode::Select(select_state) => {
+                let branch_ref = select_state.branch_ref.clone();
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.move_focus_within_branch(&branch_ref, 1);
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.move_focus_within_branch(&branch_ref, -1);
+                    }
+                    KeyCode::Char(' ') => self.toggle_focused_selection(),
+                    KeyCode::Char(':') => self.open_command_line(),
+                    KeyCode::Esc => self.exit_select_mode(),
+                    _ => {}
+                }
                 return;
             }
             Mode::Command(_) => match key.code {
@@ -203,7 +234,10 @@ impl App {
             Mode::Command(command) => {
                 text_input::edit_line(&mut command.text, &mut command.cursor, &key);
             }
-            Mode::Normal | Mode::ConfirmClear(_) | Mode::ConfirmDispatchTrust(_) => {}
+            Mode::Normal
+            | Mode::Select(_)
+            | Mode::ConfirmClear(_)
+            | Mode::ConfirmDispatchTrust(_) => {}
         }
     }
 }

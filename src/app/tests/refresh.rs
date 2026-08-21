@@ -319,3 +319,116 @@ fn refresh_repository_enforces_interval_and_guards_empty_common_dir() {
     });
     assert_eq!(calls.get(), 1);
 }
+
+#[test]
+fn refresh_select_mode_prunes_deleted_ids_and_preserves_empty_selection_when_todos_remain() {
+    let directory = std::env::temp_dir().join(format!(
+        "refdo-select-prune-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let database = directory.join("data.db");
+    let store = TodoStore::open(&database).unwrap();
+    let mut other = TodoStore::open(&database).unwrap();
+    let t1 = other.insert_todo("refs/heads/main", "first", None).unwrap();
+    let t2 = other
+        .insert_todo("refs/heads/main", "second", Some(t1.id))
+        .unwrap();
+
+    let mut app = app_with_sections(vec![section("main")]);
+    app.store = store;
+    app.data_version = app.store.data_version().unwrap();
+    app.reload();
+
+    app.focus = Some(Focus::Todo(t1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+
+    // External process deletes the selected and focused todo t1
+    other.delete_todo(t1.id).unwrap();
+    app.refresh_external();
+
+    let Mode::Select(select_state) = &app.mode else {
+        panic!("expected select mode to remain active while section has todos");
+    };
+    assert!(select_state.selected_todo_ids.is_empty());
+    assert_eq!(app.focus, Some(Focus::Todo(t2.id)));
+
+    drop(other);
+    drop(app);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn refresh_select_mode_exits_to_normal_mode_when_section_has_no_remaining_todos() {
+    let directory = std::env::temp_dir().join(format!(
+        "refdo-select-exit-empty-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let database = directory.join("data.db");
+    let store = TodoStore::open(&database).unwrap();
+    let mut other = TodoStore::open(&database).unwrap();
+    let t1 = other
+        .insert_todo("refs/heads/topic", "sole todo", None)
+        .unwrap();
+
+    let mut app = app_with_sections(vec![section("main"), section("topic")]);
+    app.store = store;
+    app.data_version = app.store.data_version().unwrap();
+    app.reload();
+
+    app.focus = Some(Focus::Todo(t1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+
+    // External process deletes the only todo in the branch
+    other.delete_todo(t1.id).unwrap();
+    app.refresh_external();
+
+    assert!(matches!(&app.mode, Mode::Normal));
+    assert_eq!(
+        app.focus,
+        Some(Focus::Branch("refs/heads/topic".to_owned()))
+    );
+
+    drop(other);
+    drop(app);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn refresh_preserves_repository_error_over_generic_error_in_select_mode() {
+    let mut app = app_with_sections(vec![section("main")]);
+    app.repository.common_git_dir = PathBuf::from("/test/repo/.git");
+    let t1 = app
+        .store
+        .insert_todo("refs/heads/main", "main todo", None)
+        .unwrap();
+    app.reload();
+
+    app.focus = Some(Focus::Todo(t1.id));
+    app.handle_key_event(key(KeyCode::Char('v')));
+
+    app.error = Some("generic database error".to_owned());
+
+    let started = Instant::now();
+    app.last_repository_refresh = started;
+    app.refresh_repository_with(started + Duration::from_secs(2), || {
+        Err("detached worktree".to_owned())
+    });
+
+    assert_eq!(
+        app.repository_error.as_deref(),
+        Some("repository: detached worktree")
+    );
+    assert_eq!(app.error.as_deref(), Some("generic database error"));
+
+    let backend = TestBackend::new(60, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    let footer = row_text(&terminal, 5);
+    assert!(
+        footer.starts_with(" SELECT · 1 selected repository: detached worktree"),
+        "unexpected footer: {footer}"
+    );
+}
